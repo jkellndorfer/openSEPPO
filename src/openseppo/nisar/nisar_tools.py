@@ -200,11 +200,10 @@ def create_s3_fs(auth_config=None):
     if auth_config.get("use_earthdata"):
         if not HAS_EARTHACCESS:
             raise ImportError("Install 'earthaccess'.")
-        # Reuse an existing earthaccess session; login() was already called
-        # once at process_chunk_task level to avoid the slow per-call round-trip.
-        auth = getattr(earthaccess, "_auth", None) or earthaccess.login(strategy="netrc")
-        if not auth:
-            raise PermissionError("Earthdata Login failed.")
+        # Login is always called before create_s3_fs from process_chunk_task.
+        # Fall back to a fresh login if somehow called standalone.
+        if earthaccess._store is None:
+            _earthaccess_login()
         return earthaccess.get_s3_filesystem(endpoint="https://nisar.asf.earthdatacloud.nasa.gov/s3credentials")
 
     if "profile" in auth_config and auth_config["profile"]:
@@ -221,6 +220,40 @@ def create_s3_fs(auth_config=None):
 # =========================================================
 # 1b. REPROJECTION HELPERS
 # =========================================================
+
+
+def _ensure_utm_south(crs_str, h5_handle):
+    """
+    Add +south to a proj4 UTM string when the scene is in the southern hemisphere.
+
+    NISAR files conforming to the SDS spec store projection as an integer EPSG
+    code (e.g. 32755 for UTM 55S), which includes the correct false northing.
+    Older or CalVal products may store a plain proj4 string such as
+    "+proj=utm +zone=55 +datum=WGS84" that omits +south, causing a 10 000 000 m
+    northing displacement.  We detect this by reading the scene bounding polygon
+    (always in WGS84 lat/lon) from the NISAR identification group.
+    """
+    s = str(crs_str).strip()
+    if "+proj=utm" not in s.lower():
+        return s  # Not a UTM proj4 string — nothing to fix
+    if "+south" in s.lower():
+        return s  # Already hemisphere-aware
+    try:
+        bp_path = "/science/LSAR/identification/boundingPolygon"
+        if bp_path not in h5_handle:
+            return s
+        val = h5_handle[bp_path][()]
+        if hasattr(val, "decode"):
+            val = val.decode("utf-8")
+        # WKT POLYGON: coordinate pairs are "lon lat" (space-separated)
+        matches = re.findall(r"([-\d.]+)\s+([-\d.]+)", str(val))
+        if matches:
+            avg_lat = sum(float(lat) for _, lat in matches) / len(matches)
+            if avg_lat < 0:
+                s = s + " +south"
+    except Exception:
+        pass
+    return s
 
 
 def _parse_crs(crs_input):
@@ -1046,7 +1079,10 @@ def inspect_h5_structure(f):
 
         try:
             proj_val = f[f"{g_path}/projection"][()]
-            crs = proj_val.decode() if hasattr(proj_val, "decode") else f"EPSG:{proj_val}"
+            if hasattr(proj_val, "decode"):
+                crs = _ensure_utm_south(proj_val.decode(), f)
+            else:
+                crs = f"EPSG:{proj_val}"
 
             x_coord_ds = f[f"{g_path}/xCoordinates"]
             y_coord_ds = f[f"{g_path}/yCoordinates"]
@@ -1112,7 +1148,10 @@ def get_grid_info(h5_handle, frequency="A"):
         proj_val = h5_handle[f"{grid_path}/projection"][()]
     except KeyError:
         raise KeyError(f"Grid path '{grid_path}' not found.")
-    projection = proj_val.decode() if hasattr(proj_val, "decode") else f"EPSG:{proj_val}"
+    if hasattr(proj_val, "decode"):
+        projection = _ensure_utm_south(proj_val.decode(), h5_handle)
+    else:
+        projection = f"EPSG:{proj_val}"
     # NISAR grids are uniformly spaced — only read the first two values plus
     # dataset shape to get resolution and extent without fetching the full arrays.
     nx = x_ds.shape[0]
@@ -1136,7 +1175,21 @@ def get_grid_info_from_datatree(dt, frequency="A"):
         x_coords = ds["xCoordinates"].values
         y_coords = ds["yCoordinates"].values
         proj_val = ds["projection"].values
-        projection = proj_val.decode() if hasattr(proj_val, "decode") else f"EPSG:{int(proj_val)}"
+        if hasattr(proj_val, "decode"):
+            raw_proj = proj_val.decode()
+            # Check bounding polygon from identification node for +south fix
+            try:
+                ident_ds = dt["science/LSAR/identification"].ds
+                bp = str(ident_ds["boundingPolygon"].values)
+                matches = re.findall(r"([-\d.]+)\s+([-\d.]+)", bp)
+                avg_lat = sum(float(lat) for _, lat in matches) / len(matches) if matches else 0.0
+            except Exception:
+                avg_lat = 0.0
+            if "+proj=utm" in raw_proj.lower() and "+south" not in raw_proj.lower() and avg_lat < 0:
+                raw_proj = raw_proj + " +south"
+            projection = raw_proj
+        else:
+            projection = f"EPSG:{int(proj_val)}"
         full_grid_path = f"/{grid_path}"
         return {"x": x_coords, "y": y_coords, "res_x": x_coords[1] - x_coords[0], "res_y": y_coords[1] - y_coords[0], "crs": projection, "grid_path": full_grid_path, "freq": frequency}
     except Exception:
@@ -1836,10 +1889,10 @@ def process_chunk_task(h5_url, variable_names, output_path, srcwin=None, projwin
 
     urls = h5_url
 
-    # Authenticate once per process for HTTPS (Earthdata) URLs.
+    # Authenticate once per process for any Earthdata URL (HTTPS or S3).
     # earthaccess caches the session globally; calling login() per file-open
     # causes a full URS round-trip each time (~60-90 s on cold start).
-    if use_earthdata and HAS_EARTHACCESS and urls and urls[0].startswith("https://"):
+    if use_earthdata and HAS_EARTHACCESS and urls:
         if verbose:
             import time as _time
             _t0 = _time.perf_counter()
@@ -2075,7 +2128,7 @@ def rebuild_vrts(output_path, variable_names, transform_mode="AMP", frequency="A
         variable_names = sorted(pols)
 
     # --- 2. PARSE METADATA & GROUP ---
-    dates_map = defaultdict(dict)
+    dates_map = defaultdict(lambda: defaultdict(dict))
     ref_info = None
 
     date_pattern = r"(\d{8})T"
@@ -2096,6 +2149,11 @@ def rebuild_vrts(output_path, variable_names, transform_mode="AMP", frequency="A
         pol_found = p_match.group(1).upper()
         key_pol = pol_found[:2]
 
+        entry = dates_map[ymd][key_pol]
+        entry["path"] = fpath
+        entry["filename"] = basename
+        entry["date_fmt"] = fmt_date
+
         # Read per-file geometry for union VRT support
         try:
             if fs:
@@ -2105,13 +2163,13 @@ def rebuild_vrts(output_path, variable_names, transform_mode="AMP", frequency="A
             else:
                 with rasterio.open(fpath) as ds:
                     file_geo = {"w": ds.width, "h": ds.height, "transform": ds.transform, "crs": ds.crs.to_wkt(), "dtype": ds.dtypes[0]}
-            dates_map[ymd][key_pol]["geo"] = file_geo
+            entry["geo"] = file_geo
             if ref_info is None:
                 ref_info = file_geo
         except Exception as e:
             if verbose:
                 print(f"Warning: Failed to read metadata from {basename}: {e}")
-            dates_map[ymd][key_pol]["geo"] = None
+            entry["geo"] = None
 
     if not ref_info:
         return "Could not open any TIFs to get reference geometry. Check S3 permissions."
