@@ -200,11 +200,10 @@ def create_s3_fs(auth_config=None):
     if auth_config.get("use_earthdata"):
         if not HAS_EARTHACCESS:
             raise ImportError("Install 'earthaccess'.")
-        # Reuse an existing earthaccess session; login() was already called
-        # once at process_chunk_task level to avoid the slow per-call round-trip.
-        auth = getattr(earthaccess, "_auth", None) or earthaccess.login(strategy="netrc")
-        if not auth:
-            raise PermissionError("Earthdata Login failed.")
+        # Login is always called before create_s3_fs from process_chunk_task.
+        # Fall back to a fresh login if somehow called standalone.
+        if earthaccess._store is None:
+            _earthaccess_login()
         return earthaccess.get_s3_filesystem(endpoint="https://nisar.asf.earthdatacloud.nasa.gov/s3credentials")
 
     if "profile" in auth_config and auth_config["profile"]:
@@ -221,6 +220,40 @@ def create_s3_fs(auth_config=None):
 # =========================================================
 # 1b. REPROJECTION HELPERS
 # =========================================================
+
+
+def _ensure_utm_south(crs_str, h5_handle):
+    """
+    Add +south to a proj4 UTM string when the scene is in the southern hemisphere.
+
+    NISAR files conforming to the SDS spec store projection as an integer EPSG
+    code (e.g. 32755 for UTM 55S), which includes the correct false northing.
+    Older or CalVal products may store a plain proj4 string such as
+    "+proj=utm +zone=55 +datum=WGS84" that omits +south, causing a 10 000 000 m
+    northing displacement.  We detect this by reading the scene bounding polygon
+    (always in WGS84 lat/lon) from the NISAR identification group.
+    """
+    s = str(crs_str).strip()
+    if "+proj=utm" not in s.lower():
+        return s  # Not a UTM proj4 string — nothing to fix
+    if "+south" in s.lower():
+        return s  # Already hemisphere-aware
+    try:
+        bp_path = "/science/LSAR/identification/boundingPolygon"
+        if bp_path not in h5_handle:
+            return s
+        val = h5_handle[bp_path][()]
+        if hasattr(val, "decode"):
+            val = val.decode("utf-8")
+        # WKT POLYGON: coordinate pairs are "lon lat" (space-separated)
+        matches = re.findall(r"([-\d.]+)\s+([-\d.]+)", str(val))
+        if matches:
+            avg_lat = sum(float(lat) for _, lat in matches) / len(matches)
+            if avg_lat < 0:
+                s = s + " +south"
+    except Exception:
+        pass
+    return s
 
 
 def _parse_crs(crs_input):
@@ -510,7 +543,7 @@ def generate_vrt_xml_single_step(width, height, transform, crs_wkt, band_files, 
             nodata_val = "nan"
 
     geo_transform = f"{transform.c}, {transform.a}, {transform.b}, {transform.f}, {transform.d}, {transform.e}"
-    xml = [f'<VRTDataset rasterXSize="{width}" rasterYSize="{height}">', f'  <SRS dataAxisToSRSAxisMapping="2,1">{crs_wkt}</SRS>', f"  <GeoTransform>{geo_transform}</GeoTransform>"]
+    xml = [f'<VRTDataset rasterXSize="{width}" rasterYSize="{height}">', f'  <SRS dataAxisToSRSAxisMapping="1,2">{crs_wkt}</SRS>', f"  <GeoTransform>{geo_transform}</GeoTransform>"]
     for i, (fpath, bname) in enumerate(zip(band_files, band_names)):
         if fpath.startswith("s3://"):
             bucket, key = fpath.replace("s3://", "").split("/", 1)
@@ -551,7 +584,7 @@ def generate_vrt_xml_timeseries(width, height, transform, crs_wkt, stack_items, 
 
     geo_transform = f"{transform.c}, {transform.a}, {transform.b}, {transform.f}, {transform.d}, {transform.e}"
 
-    xml = [f'<VRTDataset rasterXSize="{width}" rasterYSize="{height}">', f'  <SRS dataAxisToSRSAxisMapping="2,1">{crs_wkt}</SRS>', f"  <GeoTransform>{geo_transform}</GeoTransform>"]
+    xml = [f'<VRTDataset rasterXSize="{width}" rasterYSize="{height}">', f'  <SRS dataAxisToSRSAxisMapping="1,2">{crs_wkt}</SRS>', f"  <GeoTransform>{geo_transform}</GeoTransform>"]
 
     for i, item in enumerate(stack_items):
         fpath = item["path"]
@@ -606,7 +639,7 @@ def generate_vrt_xml_timeseries_union(crs_wkt, stack_items, dtype="Float32", nod
     geo_transform = f"{union_transform.c}, {union_transform.a}, {union_transform.b}, {union_transform.f}, {union_transform.d}, {union_transform.e}"
     xml = [
         f'<VRTDataset rasterXSize="{union_w}" rasterYSize="{union_h}">',
-        f'  <SRS dataAxisToSRSAxisMapping="2,1">{crs_wkt}</SRS>',
+        f'  <SRS dataAxisToSRSAxisMapping="1,2">{crs_wkt}</SRS>',
         f"  <GeoTransform>{geo_transform}</GeoTransform>",
     ]
 
@@ -781,10 +814,46 @@ def _write_h5_subset(src_f, grid_path, variable_names, col, row, w, h):
 # =========================================================
 
 
-def cache_to_local(url, localdir=None, keep=False, use_earthdata=False):
+def _estimate_remote_size(url, fs=None):
+    """Best-effort file size in bytes; returns 0 on failure."""
+    try:
+        if url.startswith("s3://") and fs is not None:
+            return fs.info(url)["size"]
+        if not url.startswith(("s3://", "https://")):
+            return os.path.getsize(url)
+    except Exception:
+        pass
+    return 0
+
+
+def _shm_tmpdir(needed_bytes, multiplier=2):
+    """
+    Return /dev/shm if it exists, is writable, and has at least
+    multiplier * needed_bytes free.  Otherwise return None.
+    """
+    shm = "/dev/shm"
+    if not os.path.isdir(shm):
+        return None
+    try:
+        if shutil.disk_usage(shm).free >= needed_bytes * multiplier:
+            return shm
+    except OSError:
+        pass
+    return None
+
+
+def cache_to_local(url, localdir=None, keep=False, use_earthdata=False, fs=None):
+    is_remote = url.startswith(("https://", "s3://"))
+
+    # Local files: skip caching unless an explicit directory was given.
+    # Creating a temp symlink to a local file wastes time without benefit.
+    if not is_remote and localdir in [None, "yes", "y"]:
+        return url
 
     if localdir in [None, "yes", "y"]:
-        localdir = tempfile.mkdtemp(prefix="tmp_h5toCOG_")
+        size = _estimate_remote_size(url, fs=fs)
+        tmpdir = (_shm_tmpdir(size) if size > 0 else None) or tempfile.gettempdir()
+        localdir = tempfile.mkdtemp(prefix="tmp_h5toCOG_", dir=tmpdir)
         if not keep:
             atexit.register(shutil.rmtree, localdir, True)
 
@@ -795,12 +864,7 @@ def cache_to_local(url, localdir=None, keep=False, use_earthdata=False):
     print(f"---> Caching {url} to {localdir} ... ", flush=True, end="")
 
     if url.startswith("https://"):
-        if use_earthdata:
-            earthaccess.login(strategy="netrc")
-            earthaccess.download([url], localdir)
-        else:
-            import urllib.request
-            urllib.request.urlretrieve(url, local_path)
+        _download_https(url, local_path, localdir, use_earthdata=use_earthdata)
     elif url.startswith("s3://"):
         # s3:// — use aws cli (with optional earthdata S3 credentials)
         env = os.environ.copy()
@@ -810,11 +874,10 @@ def cache_to_local(url, localdir=None, keep=False, use_earthdata=False):
             env["AWS_ACCESS_KEY_ID"] = creds["accessKeyId"]
             env["AWS_SECRET_ACCESS_KEY"] = creds["secretAccessKey"]
             env["AWS_SESSION_TOKEN"] = creds["sessionToken"]
-            print("GOT CREDS FROM EARTHACCESS", flush=True)
         cmd = f"aws s3 cp {url} {localdir}"
         sp.check_call(shlex.split(cmd), env=env)
     else:
-        # local file — symlink into cache dir
+        # local file into an explicit cache dir — symlink
         os.symlink(os.path.abspath(url), local_path)
 
     print("done")
@@ -823,6 +886,144 @@ def cache_to_local(url, localdir=None, keep=False, use_earthdata=False):
         atexit.register(_unlink, local_path)
 
     return local_path
+
+
+def _download_https(url, local_path, localdir, use_earthdata=False):
+    """Download an HTTPS URL, preferring aria2c for parallel connections."""
+    if shutil.which("aria2c"):
+        download_url = url
+        if use_earthdata:
+            # earthaccess URLs redirect to a presigned S3 URL; aria2c cannot
+            # follow the OAuth redirect chain, so resolve it first.
+            session = earthaccess.get_requests_https_session()
+            resp = session.get(url, allow_redirects=False)
+            if resp.status_code in (302, 303):
+                download_url = resp.headers["Location"]
+            else:
+                # Could not resolve presigned URL — fall back to earthaccess
+                earthaccess.login(strategy="netrc")
+                earthaccess.download([url], localdir)
+                return
+        cmd = [
+            "aria2c",
+            "-x", "16", "-s", "16",
+            "--auto-file-renaming=false",
+            "-d", localdir,
+            "-o", os.path.basename(local_path),
+            download_url,
+        ]
+        sp.check_call(cmd)
+        return
+
+    # Fallback: earthaccess or plain urllib
+    if use_earthdata:
+        earthaccess.login(strategy="netrc")
+        earthaccess.download([url], localdir)
+    else:
+        import urllib.request
+        urllib.request.urlretrieve(url, local_path)
+
+
+def _s3_creds_from_fs(fs):
+    """Extract serializable S3 credentials from an s3fs.S3FileSystem object."""
+    if fs is None:
+        return {}
+    try:
+        key = fs.key or fs.storage_options.get("key")
+        secret = fs.secret or fs.storage_options.get("secret")
+        token = fs.token or fs.storage_options.get("token")
+        return {"key": key, "secret": secret, "token": token}
+    except Exception:
+        return {}
+
+
+def _s3_stripe_worker(task):
+    """
+    Top-level picklable worker executed in a subprocess.
+
+    Each subprocess has its own HDF5 library state (its own 'phil' lock), so
+    multiple subprocesses can issue concurrent S3 range requests without
+    blocking each other.
+
+    task: (file_url, s3_creds, ds_path, r_start, r_end, col, w)
+    returns: (ds_path, r_start_offset, numpy_array)
+    """
+    file_url, s3_creds, ds_path, r_start, r_end, col, w, row = task
+    import h5py
+    import numpy as np
+    import s3fs
+
+    fs = s3fs.S3FileSystem(
+        key=s3_creds.get("key"),
+        secret=s3_creds.get("secret"),
+        token=s3_creds.get("token"),
+    )
+    s3_file = fs.open(file_url, mode="rb", cache_type="bytes", block_size=16 * 1024 * 1024)
+    fh = h5py.File(s3_file, driver="fileobj", mode="r", libver="latest", rdcc_nbytes=0)
+    try:
+        data = fh[ds_path][r_start:r_end, col : col + w].astype(np.float32)
+        return ds_path, r_start - row, data
+    finally:
+        fh.close()
+
+
+def _read_bands_parallel(file_url, input_fs, grid_path, variable_names, row, h, col, w, n_workers=8):
+    """
+    Read HDF5 bands from a remote S3 file using subprocesses.
+
+    h5py holds the global 'phil' RLock for the entire duration of each read,
+    including blocking S3 network waits.  Threads all serialize on this lock,
+    so ProcessPoolExecutor (one HDF5 state per process) is required for true
+    parallelism.
+
+    For local files, falls back to simple serial reads (no subprocess overhead).
+
+    Stripe row-counts are aligned to the NISAR HDF5 chunk height (512).
+    """
+    import math
+
+    CHUNK_H = 512  # NISAR default chunk height
+
+    workers_per_band = max(1, n_workers // len(variable_names))
+    stripe_h = max(CHUNK_H, math.ceil(h / workers_per_band / CHUNK_H) * CHUNK_H)
+
+    tasks = []
+    for var in variable_names:
+        ds_path = f"{grid_path}/{var}"
+        r = row
+        while r < row + h:
+            r_end = min(r + stripe_h, row + h)
+            tasks.append((var, ds_path, r, r_end))
+            r = r_end
+
+    out_arrays = {var: np.empty((h, w), dtype=np.float32) for var in variable_names}
+
+    if file_url.startswith("s3://"):
+        from concurrent.futures import ProcessPoolExecutor
+        import multiprocessing as mp
+
+        s3_creds = _s3_creds_from_fs(input_fs)
+        worker_tasks = [
+            (file_url, s3_creds, ds_path, r_start, r_end, col, w, row)
+            for var, ds_path, r_start, r_end in tasks
+        ]
+        var_order = [var for var, ds_path, r_start, r_end in tasks]
+
+        ctx = mp.get_context("spawn")
+        with ProcessPoolExecutor(max_workers=min(len(tasks), n_workers), mp_context=ctx) as pool:
+            for var, (_, offset, stripe_data) in zip(var_order, pool.map(_s3_stripe_worker, worker_tasks)):
+                out_arrays[var][offset : offset + stripe_data.shape[0]] = stripe_data
+    else:
+        # Local or HTTPS: serial reads (subprocesses add overhead without benefit here)
+        fh = open_h5_lazy(file_url, input_fs)
+        try:
+            for var in variable_names:
+                ds_path = f"{grid_path}/{var}"
+                out_arrays[var] = fh[ds_path][row : row + h, col : col + w].astype(np.float32)
+        finally:
+            fh.close()
+
+    return [out_arrays[var] for var in variable_names]
 
 
 def open_h5_lazy_slow(path, s3_fs):
@@ -881,34 +1082,22 @@ def open_datatree_lazy(path, s3_fs, verbose=False, block_size=16 * 1024 * 1024):
     if not HAS_DATATREE:
         return None
 
-    # HTTPS: tree traversal over HTTP is too slow; h5py with block reads is faster.
-    if path.startswith("https://"):
+    # Remote files (https://, s3://): tree traversal over HTTP/S3 is too slow even
+    # with block caching, because h5netcdf visits every dataset on open and a
+    # separate h5py open is still needed for band reading.  h5py with a single
+    # lazy file object is faster end-to-end for all remote paths.
+    if path.startswith("https://") or path.startswith("s3://"):
         return None
 
+    # Local files only — open directly by path
     try:
-        if path.startswith("s3://") and s3_fs:
-            file_obj = s3_fs.open(path, "rb", cache_type="bytes", block_size=block_size)
-        elif path.startswith("https://"):
-            if HAS_EARTHACCESS:
-                earthaccess.login(strategy="netrc")
-                file_obj = earthaccess.open([path])[0]
-            else:
-                import fsspec
-                file_obj = fsspec.open(path, "rb").open()
-        else:
-            file_obj = path
-
-        # Try h5netcdf first (faster), fallback to netcdf4
-        # Suppress FutureWarnings about timedelta decoding
         try:
-            dt = open_datatree(file_obj, engine="h5netcdf", phony_dims="sort", decode_timedelta=False)
+            dt = open_datatree(path, engine="h5netcdf", phony_dims="sort", decode_timedelta=False)
         except Exception:
             try:
-                dt = open_datatree(file_obj, phony_dims="sort", decode_timedelta=False)
+                dt = open_datatree(path, phony_dims="sort", decode_timedelta=False)
             except Exception:
-                # Fallback without decode_timedelta for older xarray versions
-                dt = open_datatree(file_obj, phony_dims="sort")
-
+                dt = open_datatree(path, phony_dims="sort")
         return dt
     except Exception as e:
         if verbose:
@@ -1046,7 +1235,10 @@ def inspect_h5_structure(f):
 
         try:
             proj_val = f[f"{g_path}/projection"][()]
-            crs = proj_val.decode() if hasattr(proj_val, "decode") else f"EPSG:{proj_val}"
+            if hasattr(proj_val, "decode"):
+                crs = _ensure_utm_south(proj_val.decode(), f)
+            else:
+                crs = f"EPSG:{proj_val}"
 
             x_coord_ds = f[f"{g_path}/xCoordinates"]
             y_coord_ds = f[f"{g_path}/yCoordinates"]
@@ -1112,7 +1304,10 @@ def get_grid_info(h5_handle, frequency="A"):
         proj_val = h5_handle[f"{grid_path}/projection"][()]
     except KeyError:
         raise KeyError(f"Grid path '{grid_path}' not found.")
-    projection = proj_val.decode() if hasattr(proj_val, "decode") else f"EPSG:{proj_val}"
+    if hasattr(proj_val, "decode"):
+        projection = _ensure_utm_south(proj_val.decode(), h5_handle)
+    else:
+        projection = f"EPSG:{proj_val}"
     # NISAR grids are uniformly spaced — only read the first two values plus
     # dataset shape to get resolution and extent without fetching the full arrays.
     nx = x_ds.shape[0]
@@ -1136,7 +1331,21 @@ def get_grid_info_from_datatree(dt, frequency="A"):
         x_coords = ds["xCoordinates"].values
         y_coords = ds["yCoordinates"].values
         proj_val = ds["projection"].values
-        projection = proj_val.decode() if hasattr(proj_val, "decode") else f"EPSG:{int(proj_val)}"
+        if hasattr(proj_val, "decode"):
+            raw_proj = proj_val.decode()
+            # Check bounding polygon from identification node for +south fix
+            try:
+                ident_ds = dt["science/LSAR/identification"].ds
+                bp = str(ident_ds["boundingPolygon"].values)
+                matches = re.findall(r"([-\d.]+)\s+([-\d.]+)", bp)
+                avg_lat = sum(float(lat) for _, lat in matches) / len(matches) if matches else 0.0
+            except Exception:
+                avg_lat = 0.0
+            if "+proj=utm" in raw_proj.lower() and "+south" not in raw_proj.lower() and avg_lat < 0:
+                raw_proj = raw_proj + " +south"
+            projection = raw_proj
+        else:
+            projection = f"EPSG:{int(proj_val)}"
         full_grid_path = f"/{grid_path}"
         return {"x": x_coords, "y": y_coords, "res_x": x_coords[1] - x_coords[0], "res_y": y_coords[1] - y_coords[0], "crs": projection, "grid_path": full_grid_path, "freq": frequency}
     except Exception:
@@ -1237,7 +1446,7 @@ def pwr_to_amp(pwr, scale_factor=10**8.3):
 # =========================================================
 
 
-def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, projwin, transform_mode, frequency, single_bands, vrt, downscale_factor, target_align_pixels, input_fs, output_fs, is_batch=False, cache=None, keep=False, use_earthdata=False, verbose=False, target_srs=None, target_res=None, resample="cubic", output_format="COG", fill_holes=False, num_threads=None):
+def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, projwin, transform_mode, frequency, single_bands, vrt, downscale_factor, target_align_pixels, input_fs, output_fs, is_batch=False, cache=None, keep=False, use_earthdata=False, verbose=False, target_srs=None, target_res=None, resample="cubic", output_format="COG", fill_holes=False, num_threads=None, read_threads=8):
 
     h5_basename = h5_url.split("/")[-1]
     base_name = h5_basename[:-3] if h5_basename.lower().endswith(".h5") else h5_basename
@@ -1267,7 +1476,7 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
         _t_file = _time.perf_counter()
     try:
         if cache is not None:
-            file_url = cache_to_local(h5_url, localdir=cache, keep=keep, use_earthdata=use_earthdata)
+            file_url = cache_to_local(h5_url, localdir=cache, keep=keep, use_earthdata=use_earthdata, fs=input_fs)
             # Track the cached file so we can remove it immediately after processing
             if not keep:
                 cached_file_path = file_url
@@ -1285,13 +1494,13 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
             info = get_grid_info_from_datatree(dt, frequency=frequency)
             acq_meta = get_acquisition_metadata_from_datatree(dt)
 
-        if info is None or acq_meta is None:
-            # datatree unavailable or metadata path not found — open h5py
-            f = open_h5_lazy(file_url, input_fs)
-            if info is None:
-                info = get_grid_info(f, frequency=frequency)
-            if acq_meta is None:
-                acq_meta = get_acquisition_metadata(f)
+        # Always open an h5py handle: needed for band reading regardless of
+        # whether datatree succeeded for metadata (local files only use datatree).
+        f = open_h5_lazy(file_url, input_fs)
+        if info is None:
+            info = get_grid_info(f, frequency=frequency)
+        if acq_meta is None:
+            acq_meta = get_acquisition_metadata(f)
 
         if verbose:
             print(f"    [t] file open + metadata: {_time.perf_counter()-_t_file:.1f}s", flush=True)
@@ -1430,28 +1639,23 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                 print(f"    Extracting {len(variable_names)} bands...", flush=True)
                 _t_read = _time.perf_counter()
 
-            # OPTIMIZATION: Use datatree for faster band reading if available
-            if use_datatree:
+            # For local files use datatree if available; for remote paths use
+            # parallel h5py reads (each band×stripe gets its own file handle and
+            # S3 connection, giving N×k concurrent range requests).
+            _is_remote = file_url.startswith("s3://") or file_url.startswith("https://")
+            if use_datatree and not _is_remote:
                 try:
                     row_slice = slice(row, row + h)
                     col_slice = slice(col, col + w)
                     bands_data = read_variables_datatree(dt, info["grid_path"], variable_names, row_slice, col_slice)
                     if verbose:
-                        print(f"    ✓ Used datatree for optimized band extraction", flush=True)
+                        print(f"    ✓ Used datatree for band extraction", flush=True)
                 except Exception as e:
                     if verbose:
-                        print(f"    ⚠ Datatree read failed, falling back to h5py: {e}", flush=True)
-                    # Fallback to h5py
-                    bands_data = []
-                    for var in variable_names:
-                        ds_path = f"{info['grid_path']}/{var}"
-                        bands_data.append(f[ds_path][row : row + h, col : col + w].astype(np.float32))  # noqa
+                        print(f"    ⚠ Datatree read failed, falling back to parallel h5py: {e}", flush=True)
+                    bands_data = _read_bands_parallel(file_url, input_fs, info["grid_path"], variable_names, row, h, col, w, n_workers=read_threads)
             else:
-                # Use h5py (original method)
-                bands_data = []
-                for var in variable_names:
-                    ds_path = f"{info['grid_path']}/{var}"
-                    bands_data.append(f[ds_path][row : row + h, col : col + w].astype(np.float32))  # noqa
+                bands_data = _read_bands_parallel(file_url, input_fs, info["grid_path"], variable_names, row, h, col, w, n_workers=read_threads)
 
             data_stack = np.stack(bands_data)
             if verbose:
@@ -1577,20 +1781,10 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                 if verbose:
                     print(f"      [{i+1}/{len(variable_names)}] Processing {var}...", flush=True)
 
-                # Read single band
-                if use_datatree:
-                    try:
-                        row_slice = slice(row, row + h)
-                        col_slice = slice(col, col + w)
-                        band_data = read_variables_datatree(dt, info["grid_path"], [var], row_slice, col_slice)[0]
-                    except Exception as e:
-                        if verbose and i == 0:  # Only print warning once
-                            print(f"        ⚠ Datatree read failed, using h5py: {e}", flush=True)
-                        ds_path = f"{info['grid_path']}/{var}"
-                        band_data = f[ds_path][row : row + h, col : col + w].astype(np.float32)  # noqa
-                else:
-                    ds_path = f"{info['grid_path']}/{var}"
-                    band_data = f[ds_path][row : row + h, col : col + w].astype(np.float32)  # noqa
+                # Read single band — use striped parallel reads for remote files
+                band_data = _read_bands_parallel(
+                    file_url, input_fs, info["grid_path"], [var], row, h, col, w, n_workers=read_threads
+                )[0]
 
                 # Reshape for downscaling (add band dimension)
                 band_data = band_data[np.newaxis, :, :]
@@ -1823,7 +2017,7 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
 # =========================================================
 
 
-def process_chunk_task(h5_url, variable_names, output_path, srcwin=None, projwin=None, transform_mode="db", frequency="A", single_bands=False, vrt=False, downscale_factor=None, target_align_pixels=False, input_auth=None, output_auth=None, time_series_vrt=True, list_grids=False, cache=None, keep=False, verbose=False, target_srs=None, target_res=None, resample="cubic", output_format="COG", fill_holes=False, num_threads=None):
+def process_chunk_task(h5_url, variable_names, output_path, srcwin=None, projwin=None, transform_mode="db", frequency="A", single_bands=False, vrt=False, downscale_factor=None, target_align_pixels=False, input_auth=None, output_auth=None, time_series_vrt=True, list_grids=False, cache=None, keep=False, verbose=False, target_srs=None, target_res=None, resample="cubic", output_format="COG", fill_holes=False, num_threads=None, read_threads=8):
 
     use_earthdata = False
     if input_auth is None:
@@ -1836,10 +2030,10 @@ def process_chunk_task(h5_url, variable_names, output_path, srcwin=None, projwin
 
     urls = h5_url
 
-    # Authenticate once per process for HTTPS (Earthdata) URLs.
+    # Authenticate once per process for any Earthdata URL (HTTPS or S3).
     # earthaccess caches the session globally; calling login() per file-open
     # causes a full URS round-trip each time (~60-90 s on cold start).
-    if use_earthdata and HAS_EARTHACCESS and urls and urls[0].startswith("https://"):
+    if use_earthdata and HAS_EARTHACCESS and urls:
         if verbose:
             import time as _time
             _t0 = _time.perf_counter()
@@ -1943,7 +2137,7 @@ def process_chunk_task(h5_url, variable_names, output_path, srcwin=None, projwin
             output_fs = create_s3_fs(output_auth)
 
         for url in urls:
-            res = _process_single_file(url, variable_names, output_path, srcwin, projwin, transform_mode, frequency, single_bands, vrt, downscale_factor, target_align_pixels, input_fs, output_fs, is_batch=is_batch, cache=cache, keep=keep, use_earthdata=use_earthdata, verbose=verbose, target_srs=target_srs, target_res=target_res, resample=resample, output_format=output_format, fill_holes=fill_holes, num_threads=num_threads)
+            res = _process_single_file(url, variable_names, output_path, srcwin, projwin, transform_mode, frequency, single_bands, vrt, downscale_factor, target_align_pixels, input_fs, output_fs, is_batch=is_batch, cache=cache, keep=keep, use_earthdata=use_earthdata, verbose=verbose, target_srs=target_srs, target_res=target_res, resample=resample, output_format=output_format, fill_holes=fill_holes, num_threads=num_threads, read_threads=read_threads)
             results_meta.append(res)
 
         if is_batch and time_series_vrt and output_format.lower() != "h5":
@@ -2075,7 +2269,7 @@ def rebuild_vrts(output_path, variable_names, transform_mode="AMP", frequency="A
         variable_names = sorted(pols)
 
     # --- 2. PARSE METADATA & GROUP ---
-    dates_map = defaultdict(dict)
+    dates_map = defaultdict(lambda: defaultdict(dict))
     ref_info = None
 
     date_pattern = r"(\d{8})T"
@@ -2096,6 +2290,11 @@ def rebuild_vrts(output_path, variable_names, transform_mode="AMP", frequency="A
         pol_found = p_match.group(1).upper()
         key_pol = pol_found[:2]
 
+        entry = dates_map[ymd][key_pol]
+        entry["path"] = fpath
+        entry["filename"] = basename
+        entry["date_fmt"] = fmt_date
+
         # Read per-file geometry for union VRT support
         try:
             if fs:
@@ -2105,13 +2304,13 @@ def rebuild_vrts(output_path, variable_names, transform_mode="AMP", frequency="A
             else:
                 with rasterio.open(fpath) as ds:
                     file_geo = {"w": ds.width, "h": ds.height, "transform": ds.transform, "crs": ds.crs.to_wkt(), "dtype": ds.dtypes[0]}
-            dates_map[ymd][key_pol]["geo"] = file_geo
+            entry["geo"] = file_geo
             if ref_info is None:
                 ref_info = file_geo
         except Exception as e:
             if verbose:
                 print(f"Warning: Failed to read metadata from {basename}: {e}")
-            dates_map[ymd][key_pol]["geo"] = None
+            entry["geo"] = None
 
     if not ref_info:
         return "Could not open any TIFs to get reference geometry. Check S3 permissions."
