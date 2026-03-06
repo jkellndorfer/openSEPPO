@@ -99,7 +99,7 @@ def myargsparse(a):
     group.add_argument("-srcwin", "--srcwin", nargs=4, type=int, metavar=("XOFF", "YOFF", "XSIZE", "YSIZE"), help="Pixel subset window.")
     group.add_argument("-projwin", "--projwin", nargs=4, type=float, metavar=("ULX", "ULY", "LRX", "LRY"), help="Geographic subset window (map coordinates).")
     parser.add_argument("-tap", "--align_pixels", action="store_true", help="Align target subset to global grid multiples.")
-    parser.add_argument("-t_srs", "--target_srs", type=str, default=None, help="Target CRS for output (e.g. EPSG:4326). If omitted, output stays in native UTM CRS.")
+    parser.add_argument("-t_srs", "--target_srs", type=str, default=None, help="Target CRS for output (e.g. EPSG:4326 or bare 4326). If omitted, output stays in native UTM CRS.")
     parser.add_argument("-tr", "--target_res", type=float, nargs=2, metavar=("XRES", "YRES"), default=None, help="Explicit output pixel size in target CRS units (e.g. -tr 0.001 0.001 for ~100m in degrees). Only used with --target_srs.")
     parser.add_argument("--resample", type=str, default="cubic", help="Resampling method for reprojection (nearest/bilinear/cubic/cubicspline/lanczos/average). Default: cubic.")
     parser.add_argument("--fill_holes", action="store_true", help="Before reprojection, fill interior NaN/±inf pixels (those enclosed by valid data) with their nearest valid neighbour. Frame-boundary nodata is unaffected. Prevents the resampling kernel from seeing isolated invalid pixels inside the valid image area.")

@@ -234,6 +234,9 @@ def _parse_crs(crs_input):
     s = str(crs_input).strip()
     if s.upper().startswith("EPSG:"):
         return CRS.from_epsg(int(s.split(":")[1]))
+    # Bare numeric string → treat as EPSG code (e.g. "32634" → EPSG:32634)
+    if s.isdigit():
+        return CRS.from_epsg(int(s))
     try:
         return CRS.from_wkt(s)
     except Exception:
