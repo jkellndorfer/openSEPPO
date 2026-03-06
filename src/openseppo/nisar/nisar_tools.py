@@ -543,7 +543,7 @@ def generate_vrt_xml_single_step(width, height, transform, crs_wkt, band_files, 
             nodata_val = "nan"
 
     geo_transform = f"{transform.c}, {transform.a}, {transform.b}, {transform.f}, {transform.d}, {transform.e}"
-    xml = [f'<VRTDataset rasterXSize="{width}" rasterYSize="{height}">', f'  <SRS dataAxisToSRSAxisMapping="2,1">{crs_wkt}</SRS>', f"  <GeoTransform>{geo_transform}</GeoTransform>"]
+    xml = [f'<VRTDataset rasterXSize="{width}" rasterYSize="{height}">', f'  <SRS dataAxisToSRSAxisMapping="1,2">{crs_wkt}</SRS>', f"  <GeoTransform>{geo_transform}</GeoTransform>"]
     for i, (fpath, bname) in enumerate(zip(band_files, band_names)):
         if fpath.startswith("s3://"):
             bucket, key = fpath.replace("s3://", "").split("/", 1)
@@ -584,7 +584,7 @@ def generate_vrt_xml_timeseries(width, height, transform, crs_wkt, stack_items, 
 
     geo_transform = f"{transform.c}, {transform.a}, {transform.b}, {transform.f}, {transform.d}, {transform.e}"
 
-    xml = [f'<VRTDataset rasterXSize="{width}" rasterYSize="{height}">', f'  <SRS dataAxisToSRSAxisMapping="2,1">{crs_wkt}</SRS>', f"  <GeoTransform>{geo_transform}</GeoTransform>"]
+    xml = [f'<VRTDataset rasterXSize="{width}" rasterYSize="{height}">', f'  <SRS dataAxisToSRSAxisMapping="1,2">{crs_wkt}</SRS>', f"  <GeoTransform>{geo_transform}</GeoTransform>"]
 
     for i, item in enumerate(stack_items):
         fpath = item["path"]
@@ -639,7 +639,7 @@ def generate_vrt_xml_timeseries_union(crs_wkt, stack_items, dtype="Float32", nod
     geo_transform = f"{union_transform.c}, {union_transform.a}, {union_transform.b}, {union_transform.f}, {union_transform.d}, {union_transform.e}"
     xml = [
         f'<VRTDataset rasterXSize="{union_w}" rasterYSize="{union_h}">',
-        f'  <SRS dataAxisToSRSAxisMapping="2,1">{crs_wkt}</SRS>',
+        f'  <SRS dataAxisToSRSAxisMapping="1,2">{crs_wkt}</SRS>',
         f"  <GeoTransform>{geo_transform}</GeoTransform>",
     ]
 
