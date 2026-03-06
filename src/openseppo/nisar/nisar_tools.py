@@ -1171,6 +1171,9 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
     f = None
     dt = None
     cached_file_path = None  # Track cached file for immediate cleanup
+    if verbose:
+        import time as _time
+        _t_file = _time.perf_counter()
     try:
         if cache is not None:
             file_url = cache_to_local(h5_url, localdir=cache, keep=keep, use_earthdata=use_earthdata)
@@ -1198,6 +1201,10 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                 info = get_grid_info(f, frequency=frequency)
             if acq_meta is None:
                 acq_meta = get_acquisition_metadata(f)
+
+        if verbose:
+            print(f"    [t] file open + metadata: {_time.perf_counter()-_t_file:.1f}s", flush=True)
+            _t_file = _time.perf_counter()
 
         date_str = acq_meta.get("ACQUISITION_DATE", "Unknown")
 
@@ -1330,6 +1337,7 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
         else:
             if verbose:
                 print(f"    Extracting {len(variable_names)} bands...", flush=True)
+                _t_read = _time.perf_counter()
 
             # OPTIMIZATION: Use datatree for faster band reading if available
             if use_datatree:
@@ -1355,6 +1363,11 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                     bands_data.append(f[ds_path][row : row + h, col : col + w].astype(np.float32))  # noqa
 
             data_stack = np.stack(bands_data)
+            if verbose:
+                shape = data_stack.shape
+                mb = data_stack.nbytes / 1e6
+                print(f"    [t] data read ({shape[0]}×{shape[1]}×{shape[2]}, {mb:.1f} MB): {_time.perf_counter()-_t_read:.1f}s", flush=True)
+                _t_file = _time.perf_counter()
 
         x_center = info["x"][col]
         y_center = info["y"][row]
@@ -1594,6 +1607,7 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
             if single_bands:
                 if verbose:
                     print("    Writing separate bands...", flush=True)
+                    _t_write = _time.perf_counter()
                 generated_files = []
                 for i, var in enumerate(variable_names):
                     pol_str = var[:2].lower()
@@ -1619,6 +1633,10 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                         files_map[var] = band_path
                         generated_files.append(band_path)
 
+                if verbose:
+                    sz = sum(os.path.getsize(p) for p in generated_files if os.path.isfile(p))
+                    print(f"    [t] COG write ({len(generated_files)} bands, {sz/1e6:.1f} MB): {_time.perf_counter()-_t_write:.1f}s", flush=True)
+
                 if vrt:
                     pol_list_str = "".join([v[:2].lower() for v in variable_names])
                     vrt_suffix = f"-EBD_{frequency}_{pol_list_str}_{mode_str}.vrt"
@@ -1636,6 +1654,7 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
             else:
                 if verbose:
                     print("    Writing Multi-band COG...", flush=True)
+                    _t_write = _time.perf_counter()
                 profile = {"driver": _driver, "height": h_out, "width": w_out, "count": len(variable_names), "dtype": output_dtype, "crs": out_crs, "transform": out_transform, "compress": "deflate", "nodata": output_nodata, **_gtiff_extra, **_write_extra}
                 with rasterio.Env(GDAL_NUM_THREADS=_n_th):
                     with MemoryFile() as memfile:
@@ -1650,6 +1669,9 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
 
                 for var in variable_names:
                     files_map[var] = final_path
+                if verbose:
+                    sz = os.path.getsize(final_path) if os.path.isfile(final_path) else 0
+                    print(f"    [t] COG write ({len(variable_names)} bands, {sz/1e6:.1f} MB): {_time.perf_counter()-_t_write:.1f}s", flush=True)
 
         if verbose:
             memory_mode = "low-memory (per-band)" if use_low_memory_mode else "standard (all-bands)"
@@ -1707,7 +1729,12 @@ def process_chunk_task(h5_url, variable_names, output_path, srcwin=None, projwin
     # earthaccess caches the session globally; calling login() per file-open
     # causes a full URS round-trip each time (~60-90 s on cold start).
     if use_earthdata and HAS_EARTHACCESS and urls and urls[0].startswith("https://"):
+        if verbose:
+            import time as _time
+            _t0 = _time.perf_counter()
         earthaccess.login(strategy="netrc")
+        if verbose:
+            print(f"    [t] earthaccess login:  {_time.perf_counter()-_t0:.1f}s", flush=True)
 
     if not list_grids and len(urls) > 1:
         is_batch = True
