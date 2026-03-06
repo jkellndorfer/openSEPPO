@@ -814,10 +814,46 @@ def _write_h5_subset(src_f, grid_path, variable_names, col, row, w, h):
 # =========================================================
 
 
-def cache_to_local(url, localdir=None, keep=False, use_earthdata=False):
+def _estimate_remote_size(url, fs=None):
+    """Best-effort file size in bytes; returns 0 on failure."""
+    try:
+        if url.startswith("s3://") and fs is not None:
+            return fs.info(url)["size"]
+        if not url.startswith(("s3://", "https://")):
+            return os.path.getsize(url)
+    except Exception:
+        pass
+    return 0
+
+
+def _shm_tmpdir(needed_bytes, multiplier=2):
+    """
+    Return /dev/shm if it exists, is writable, and has at least
+    multiplier * needed_bytes free.  Otherwise return None.
+    """
+    shm = "/dev/shm"
+    if not os.path.isdir(shm):
+        return None
+    try:
+        if shutil.disk_usage(shm).free >= needed_bytes * multiplier:
+            return shm
+    except OSError:
+        pass
+    return None
+
+
+def cache_to_local(url, localdir=None, keep=False, use_earthdata=False, fs=None):
+    is_remote = url.startswith(("https://", "s3://"))
+
+    # Local files: skip caching unless an explicit directory was given.
+    # Creating a temp symlink to a local file wastes time without benefit.
+    if not is_remote and localdir in [None, "yes", "y"]:
+        return url
 
     if localdir in [None, "yes", "y"]:
-        localdir = tempfile.mkdtemp(prefix="tmp_h5toCOG_")
+        size = _estimate_remote_size(url, fs=fs)
+        tmpdir = (_shm_tmpdir(size) if size > 0 else None) or tempfile.gettempdir()
+        localdir = tempfile.mkdtemp(prefix="tmp_h5toCOG_", dir=tmpdir)
         if not keep:
             atexit.register(shutil.rmtree, localdir, True)
 
@@ -828,12 +864,7 @@ def cache_to_local(url, localdir=None, keep=False, use_earthdata=False):
     print(f"---> Caching {url} to {localdir} ... ", flush=True, end="")
 
     if url.startswith("https://"):
-        if use_earthdata:
-            earthaccess.login(strategy="netrc")
-            earthaccess.download([url], localdir)
-        else:
-            import urllib.request
-            urllib.request.urlretrieve(url, local_path)
+        _download_https(url, local_path, localdir, use_earthdata=use_earthdata)
     elif url.startswith("s3://"):
         # s3:// — use aws cli (with optional earthdata S3 credentials)
         env = os.environ.copy()
@@ -843,11 +874,10 @@ def cache_to_local(url, localdir=None, keep=False, use_earthdata=False):
             env["AWS_ACCESS_KEY_ID"] = creds["accessKeyId"]
             env["AWS_SECRET_ACCESS_KEY"] = creds["secretAccessKey"]
             env["AWS_SESSION_TOKEN"] = creds["sessionToken"]
-            print("GOT CREDS FROM EARTHACCESS", flush=True)
         cmd = f"aws s3 cp {url} {localdir}"
         sp.check_call(shlex.split(cmd), env=env)
     else:
-        # local file — symlink into cache dir
+        # local file into an explicit cache dir — symlink
         os.symlink(os.path.abspath(url), local_path)
 
     print("done")
@@ -856,6 +886,31 @@ def cache_to_local(url, localdir=None, keep=False, use_earthdata=False):
         atexit.register(_unlink, local_path)
 
     return local_path
+
+
+def _download_https(url, local_path, localdir, use_earthdata=False):
+    """Download an HTTPS URL, preferring aria2c for parallel connections."""
+    if shutil.which("aria2c"):
+        cmd = [
+            "aria2c",
+            "-x", "16", "-s", "16",  # 16 parallel connections/splits
+            "--auto-file-renaming=false",
+            "-d", localdir,
+            "-o", os.path.basename(local_path),
+        ]
+        if use_earthdata:
+            cmd += ["--netrc"]
+        cmd.append(url)
+        sp.check_call(cmd)
+        return
+
+    # Fallback: earthaccess or plain urllib
+    if use_earthdata:
+        earthaccess.login(strategy="netrc")
+        earthaccess.download([url], localdir)
+    else:
+        import urllib.request
+        urllib.request.urlretrieve(url, local_path)
 
 
 def _s3_creds_from_fs(fs):
@@ -1410,7 +1465,7 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
         _t_file = _time.perf_counter()
     try:
         if cache is not None:
-            file_url = cache_to_local(h5_url, localdir=cache, keep=keep, use_earthdata=use_earthdata)
+            file_url = cache_to_local(h5_url, localdir=cache, keep=keep, use_earthdata=use_earthdata, fs=input_fs)
             # Track the cached file so we can remove it immediately after processing
             if not keep:
                 cached_file_path = file_url
