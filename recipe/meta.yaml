@@ -1,0 +1,41 @@
+{% set version = "0.1.0" %}
+
+package:
+  name: openseppo
+  version: {{ version }}
+
+source:
+  url: https://github.com/openSEPPO/openSEPPO/archive/refs/tags/v{{ version }}.tar.gz
+  sha256: PLACEHOLDER_SHA256
+
+build:
+  number: 0
+  noarch: python
+  script: {{ PYTHON }} -m pip install . -vv --no-deps --no-build-isolation
+  entry_points:
+    - seppo_nisar_search = openseppo.cli.nisar_search:main
+    - seppo_earthaccess_credentials = openseppo.cli.earthaccess_credentials:main
+    - seppo_nisar_gcov_convert = openseppo.cli.nisar_gcov_convert:main
+
+requirements:
+  host:
+    - python >=3.12
+    - pip
+    - hatchling
+  run:
+    - python >=3.12
+    - requests >=2.28
+
+test:
+  imports:
+    - openseppo
+    - openseppo.nisar
+    - openseppo.cli
+  commands:
+    - seppo-nisar-search --help
+
+about:
+  home: https://github.com/openSEPPO/openSEPPO
+  license: MIT
+  license_file: LICENSE
+  summary: Open SEPPO Tools — geospatial and SAR processing utilities
