@@ -87,6 +87,94 @@ except ImportError:
     HAS_EARTHACCESS = False
 
 
+_EARTHACCESS_TOKEN_CACHE = os.path.expanduser("~/.cache/openseppo/earthaccess_token.json")
+
+
+def _earthaccess_login(verbose=False):
+    """
+    Login to NASA Earthdata, reusing a cached JWT token when still valid.
+
+    The token (valid ~60 days) is stored in ~/.cache/openseppo/earthaccess_token.json.
+    On a cache hit the URS OAuth handshake (~75 s) is bypassed by directly restoring
+    Auth and Store state without calling earthaccess.login() at all.
+    On a miss the full login runs and the fresh token is saved for next time.
+    """
+    import json
+    import base64
+    import datetime
+    import threading
+
+    def _jwt_expiry(access_token):
+        """Decode JWT payload and return expiry as UTC datetime, or None."""
+        try:
+            parts = access_token.split(".")
+            padding = "=" * (-len(parts[1]) % 4)
+            payload = json.loads(base64.urlsafe_b64decode(parts[1] + padding))
+            exp = payload.get("exp")
+            return datetime.datetime.utcfromtimestamp(exp) if exp else None
+        except Exception:
+            return None
+
+    def _restore_from_cache(access_token, exp):
+        """
+        Restore earthaccess Auth + Store state from a cached bearer token,
+        bypassing Store.__init__ (which runs a ~75 s OAuth cookie handshake).
+
+        earthaccess.open() for HTTPS uses Store.get_fsspec_session(), which only
+        needs the bearer token — no OAuth cookies required.
+        """
+        from earthaccess.store import Store
+
+        auth = earthaccess._auth
+        auth.token = {"access_token": access_token}
+        auth.authenticated = True
+
+        # Build a Store without calling __init__ so set_requests_session is never run.
+        store = Store.__new__(Store)
+        store.thread_locals = threading.local()
+        store.auth = auth
+        store._s3_credentials = {}
+        store._requests_cookies = {}
+        store.in_region = False
+        # _http_session is created lazily by get_session() — no network call.
+        store._http_session = auth.get_session()
+        earthaccess._store = store
+
+        if verbose:
+            print(
+                f"    [t] earthaccess login (cached token, expires {exp.date()}): instant",
+                flush=True,
+            )
+        return auth
+
+    # --- Try cached token ---
+    if os.path.exists(_EARTHACCESS_TOKEN_CACHE):
+        try:
+            with open(_EARTHACCESS_TOKEN_CACHE) as fh:
+                cached = json.load(fh)
+            access_token = cached.get("access_token", "")
+            exp = _jwt_expiry(access_token)
+            # Require at least 1 hour of remaining validity
+            if exp and exp > datetime.datetime.utcnow() + datetime.timedelta(hours=1):
+                return _restore_from_cache(access_token, exp)
+        except Exception:
+            pass  # Fall through to fresh login
+
+    # --- Full login (first run or expired token) ---
+    auth = earthaccess.login(strategy="netrc")
+
+    # Cache the token for future runs
+    if auth.authenticated and auth.token:
+        try:
+            os.makedirs(os.path.dirname(_EARTHACCESS_TOKEN_CACHE), exist_ok=True)
+            with open(_EARTHACCESS_TOKEN_CACHE, "w") as fh:
+                json.dump(auth.token, fh)
+        except Exception:
+            pass
+
+    return auth
+
+
 # =========================================================
 # INTERNAL FILE HELPERS (replaces seppopy.tools.filehandling)
 # =========================================================
@@ -1732,9 +1820,12 @@ def process_chunk_task(h5_url, variable_names, output_path, srcwin=None, projwin
         if verbose:
             import time as _time
             _t0 = _time.perf_counter()
-        earthaccess.login(strategy="netrc")
+        _earthaccess_login(verbose=verbose)
         if verbose:
-            print(f"    [t] earthaccess login:  {_time.perf_counter()-_t0:.1f}s", flush=True)
+            # Only print timing when NOT instant (cache miss); cache hit prints its own line
+            elapsed = _time.perf_counter() - _t0
+            if elapsed > 1:
+                print(f"    [t] earthaccess login:  {elapsed:.1f}s", flush=True)
 
     if not list_grids and len(urls) > 1:
         is_batch = True
