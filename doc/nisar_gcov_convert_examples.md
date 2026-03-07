@@ -153,7 +153,7 @@ seppo_nisar_gcov_convert -i file.h5 -o out/ -DN -d 20 -dpratio --no_single_bands
 ## Dual-pol ratio
 
 Computes the like-pol / cross-pol power ratio for DH (HHHH/HVHV) or DV (VVVV/VHVH)
-acquisitions. See [convert.md](convert.md) for ratio formulas per mode.
+acquisitions. See [ratio.md](ratio.md) for ratio formulas per scaling mode.
 
 ```bash
 # Dual-pol ratio with default power mode (float32)
