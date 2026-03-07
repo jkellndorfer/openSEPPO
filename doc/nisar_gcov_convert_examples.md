@@ -45,12 +45,12 @@ Output (`-o`) is a local directory or an S3 prefix (must end in `/` for batch).
 
 ## Output scaling modes
 
-| Scaling flag | Type | Conversion from dB |
-|--------------|------|--------------------|
-| *(none / `-pwr`)* | float32 | Linear power (default) |
-| `-dB` | float32 | `dB = 10·log10(pwr)` |
-| `-amp` | uint16 | `dB = 20·log10(amp) − 83`; nodata=0 |
-| `-DN` | uint8 | `dB = −31.15 + DN × 0.15`; nodata=0 |
+| Scaling flag | Type | Conversion from dB | Nodata | Clamp |
+|--------------|------|--------------------|--------|-------|
+| *(none / `-pwr`)* | float32 | Linear power (default) | NaN | — |
+| `-dB` | float32 | `dB = 10·log10(pwr)` | NaN | — |
+| `-amp` | uint16 | `dB = 20·log10(amp) − 83` | 0 | [1, 65535] |
+| `-DN` | uint8 | `dB = −31.15 + DN × 0.15` | 0 | [1, 255] |
 
 ```bash
 # Default: linear power (float32, nodata=NaN)
