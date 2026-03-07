@@ -1664,6 +1664,9 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
             else:
                 bands_data = _read_bands_parallel(file_url, input_fs, info["grid_path"], variable_names, row, h, col, w, n_workers=read_threads)
 
+            # Take magnitude of off-diagonal (complex) GCOV elements before stacking
+            # to avoid dtype promotion of the whole stack to complex.
+            bands_data = [np.abs(b).astype(np.float32) if np.iscomplexobj(b) else b for b in bands_data]
             data_stack = np.stack(bands_data)
             if verbose:
                 shape = data_stack.shape
@@ -1792,6 +1795,10 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                 band_data = _read_bands_parallel(
                     file_url, input_fs, info["grid_path"], [var], row, h, col, w, n_workers=read_threads
                 )[0]
+
+                # Take magnitude of off-diagonal (complex) GCOV elements
+                if np.iscomplexobj(band_data):
+                    band_data = np.abs(band_data).astype(np.float32)
 
                 # Reshape for downscaling (add band dimension)
                 band_data = band_data[np.newaxis, :, :]
