@@ -1920,80 +1920,70 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
 
             _, h_out, w_out = data_stack.shape
 
-            # --- TRANSFORM LOGIC (with optional dual-pol ratio per mode) ---
+            # --- TRANSFORM LOGIC ---
             if verbose:
                 print(f"    Transforming: {mode_str} (Mode: {logic_mode})", flush=True)
 
+            if logic_mode == "amp":
+                processed_data = pwr_to_amp(data_stack)
+                output_dtype = "uint16"
+                output_nodata = 0
+
+            elif logic_mode == "dn":
+                processed_data = power_to_dn_uint8(data_stack)
+                output_dtype = "uint8"
+                output_nodata = 0
+
+            elif logic_mode == "db":
+                processed_data = power_to_db_float32(data_stack)
+                output_dtype = "float32"
+                output_nodata = np.nan
+
+            else:
+                # No Transform ("pwr" or None)
+                processed_data = data_stack
+                output_dtype = "float32"
+                output_nodata = np.nan
+
+            # --- DUAL-POL RATIO: append as extra band after transform ---
             if dualpol_ratio and _ratio_pol_override:
                 num_idx = variable_names.index(_ratio_num_var)
                 den_idx = variable_names.index(_ratio_den_var)
 
                 if logic_mode == "amp":
                     # (amp_likepol / amp_crosspol) * 1000 → uint16, nodata=0, clamp [1, 65535]
-                    amp_stack = pwr_to_amp(data_stack)
                     with np.errstate(divide="ignore", invalid="ignore"):
-                        ratio_data = (amp_stack[num_idx] / amp_stack[den_idx] * 1000.0)
-                    nodata_mask = ~np.isfinite(ratio_data) | (amp_stack[den_idx] == 0)
+                        ratio_data = (processed_data[num_idx].astype(np.float32) /
+                                      processed_data[den_idx].astype(np.float32) * 1000.0)
+                    nodata_mask = ~np.isfinite(ratio_data) | (processed_data[den_idx] == 0)
                     ratio_data = np.clip(ratio_data, 1, 65535)
                     ratio_data[nodata_mask] = 0
-                    processed_data = ratio_data[np.newaxis, :, :].astype(np.uint16)
-                    output_dtype = "uint16"
-                    output_nodata = 0
+                    ratio_band = ratio_data.astype(np.uint16)
 
                 elif logic_mode == "dn":
                     # dn_likepol - dn_crosspol + 127 → uint8, nodata=0, clamp [1, 255]
-                    dn_stack = power_to_dn_uint8(data_stack).astype(np.float32)
-                    ratio_data = dn_stack[num_idx] - dn_stack[den_idx] + 127.0
-                    nodata_mask = (dn_stack[num_idx] == 0) | (dn_stack[den_idx] == 0)
+                    ratio_data = (processed_data[num_idx].astype(np.float32) -
+                                  processed_data[den_idx].astype(np.float32) + 127.0)
+                    nodata_mask = (processed_data[num_idx] == 0) | (processed_data[den_idx] == 0)
                     ratio_data = np.clip(ratio_data, 1, 255)
                     ratio_data[nodata_mask] = 0
-                    processed_data = ratio_data[np.newaxis, :, :].astype(np.uint8)
-                    output_dtype = "uint8"
-                    output_nodata = 0
+                    ratio_band = ratio_data.astype(np.uint8)
 
                 elif logic_mode == "db":
                     # dB_likepol - dB_crosspol → float32
-                    db_stack = power_to_db_float32(data_stack)
-                    ratio_data = (db_stack[num_idx] - db_stack[den_idx]).astype(np.float32)
-                    processed_data = ratio_data[np.newaxis, :, :]
-                    output_dtype = "float32"
-                    output_nodata = np.nan
+                    ratio_band = (processed_data[num_idx] - processed_data[den_idx]).astype(np.float32)
 
                 else:
                     # pwr: likepol / crosspol → float32
                     with np.errstate(divide="ignore", invalid="ignore"):
-                        ratio_data = np.where(
-                            data_stack[den_idx] != 0,
-                            data_stack[num_idx] / data_stack[den_idx],
+                        ratio_band = np.where(
+                            processed_data[den_idx] != 0,
+                            processed_data[num_idx] / processed_data[den_idx],
                             np.nan,
                         ).astype(np.float32)
-                    processed_data = ratio_data[np.newaxis, :, :]
-                    output_dtype = "float32"
-                    output_nodata = np.nan
 
-                variable_names = [_ratio_band_name]
-
-            else:
-                if logic_mode == "amp":
-                    processed_data = pwr_to_amp(data_stack)
-                    output_dtype = "uint16"
-                    output_nodata = 0
-
-                elif logic_mode == "dn":
-                    processed_data = power_to_dn_uint8(data_stack)
-                    output_dtype = "uint8"
-                    output_nodata = 0
-
-                elif logic_mode == "db":
-                    processed_data = power_to_db_float32(data_stack)
-                    output_dtype = "float32"
-                    output_nodata = np.nan
-
-                else:
-                    # No Transform ("pwr" or None)
-                    processed_data = data_stack
-                    output_dtype = "float32"
-                    output_nodata = np.nan
+                processed_data = np.concatenate([processed_data, ratio_band[np.newaxis, :, :]], axis=0)
+                variable_names = list(variable_names) + [_ratio_band_name]
 
             if single_bands:
                 if verbose:
@@ -2001,7 +1991,10 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                     _t_write = _time.perf_counter()
                 generated_files = []
                 for i, var in enumerate(variable_names):
-                    pol_str = _ratio_pol_override if _ratio_pol_override else (var.lower() if _is_qp else var[:2].lower())
+                    pol_str = (_ratio_pol_override if var == _ratio_band_name
+                               else var[:2].lower() if dualpol_ratio
+                               else var.lower() if _is_qp
+                               else var[:2].lower())
                     suffix = f"-EBD_{frequency}_{pol_str}_{mode_str}.tif"
 
                     if final_path.endswith(".tif"):
@@ -2029,7 +2022,11 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                     print(f"    [t] COG write ({len(generated_files)} bands, {sz/1e6:.1f} MB): {_time.perf_counter()-_t_write:.1f}s", flush=True)
 
                 if vrt:
-                    pol_list_str = _ratio_pol_override if _ratio_pol_override else "".join(v.lower() if _is_qp else v[:2].lower() for v in variable_names)
+                    if _ratio_pol_override:
+                        _src_vars = [v for v in variable_names if v != _ratio_band_name]
+                        pol_list_str = "".join(v[:2].lower() for v in _src_vars) + _ratio_pol_override
+                    else:
+                        pol_list_str = "".join(v.lower() if _is_qp else v[:2].lower() for v in variable_names)
                     vrt_suffix = f"-EBD_{frequency}_{pol_list_str}_{mode_str}.vrt"
 
                     if final_path.endswith(".tif"):
