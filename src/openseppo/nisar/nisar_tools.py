@@ -293,16 +293,13 @@ def _get_resampling(method):
 
 def _fill_nodata_nn(data_2d):
     """
-    Fill ALL NaN / ±inf pixels with the value of their nearest valid neighbour.
+    Fill interior NaN / ±inf pixels with the value of their nearest valid neighbour.
 
-    The image-frame boundary is handled naturally by the mask pass in
-    _reproject_power_band: destination pixels that fall outside the source
-    extent get mask=0 and are set to NaN regardless of this fill.
-    NaN regions connected to the image edge (layover, shadow, swath gaps)
-    are therefore filled here but restored to NaN in the output wherever
-    the destination pixel truly has no source coverage.
+    Only pixels not connected to the image-frame edge are filled.  Edge-connected
+    invalid regions (layover, shadow, swath gaps that reach the frame boundary)
+    are left as-is so they are not projected into the destination as false data.
     """
-    from scipy.ndimage import distance_transform_edt
+    from scipy.ndimage import distance_transform_edt, binary_fill_holes
 
     valid = np.isfinite(data_2d)
     if valid.all():
@@ -310,11 +307,15 @@ def _fill_nodata_nn(data_2d):
     if not valid.any():
         return data_2d  # nothing to fill from
 
+    # Interior invalid pixels: invalid and not reachable from any array border
+    interior_invalid = binary_fill_holes(valid) & ~valid
+    if not interior_invalid.any():
+        return data_2d
+
     row_idx, col_idx = distance_transform_edt(
         ~valid, return_distances=False, return_indices=True)
     result = data_2d.copy()
-    inv = ~valid
-    result[inv] = data_2d[row_idx[inv], col_idx[inv]]
+    result[interior_invalid] = data_2d[row_idx[interior_invalid], col_idx[interior_invalid]]
     return result
 
 
