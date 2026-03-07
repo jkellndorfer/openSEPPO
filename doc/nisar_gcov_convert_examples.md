@@ -1,7 +1,8 @@
 # seppo_nisar_gcov_convert — Examples
 
-`seppo_nisar_gcov_convert` converts NISAR GCOV HDF5 files to Cloud Optimized GeoTIFF (COG)
-with optional reprojection, downscaling, subsetting, dual-pol ratio output, and VRT time-series stacking.
+`seppo_nisar_gcov_convert` converts NISAR GCOV HDF5 files to Cloud Optimized GeoTIFF (COG),
+BigTIFF (GTiff), or HDF5 subset (h5), with optional reprojection, downscaling, subsetting,
+dual-pol ratio output, and VRT time-series stacking.
 
 ---
 
@@ -100,6 +101,9 @@ seppo_nisar_gcov_convert -i file.h5 -o out/ -t_srs 4326 --resample bilinear
 # Fill interior NaN holes (e.g. from burst gaps) during reprojection
 # Frame-boundary nodata is preserved; only interior isolated holes are filled
 seppo_nisar_gcov_convert -i file.h5 -o out/ -t_srs 4326 --fill_holes
+
+# Disable pixel-grid alignment (tap) — only relevant with -t_srs
+seppo_nisar_gcov_convert -i file.h5 -o out/ -t_srs 4326 --no_tap
 
 # Control number of threads for reprojection (default: all cores)
 seppo_nisar_gcov_convert -i file.h5 -o out/ -t_srs 4326 --warp_threads 4
@@ -279,12 +283,19 @@ seppo_nisar_gcov_convert \
     --read_threads 16 \
     -v
 
-# Quick browse: 20× downscale, DN, dual-pol ratio, 3-band COG, WGS84
+# Browse images: WGS84 ~200 m, dual-pol ratio 3-band COG, no VRTs, direct to S3
+seppo_nisar_gcov_convert \
+    -i urls.txt \
+    -o s3://my-bucket/nisar/browse/ \
+    -dB -dpratio --no_single_bands --no_vrt \
+    -t_srs 4326 -tr 0.002 0.002 --fill_holes
+
+# Geographic subset in lon/lat at ~22 m, WGS84, amplitude output
 seppo_nisar_gcov_convert \
     -i file.h5 \
-    -o browse/ \
-    -DN -d 20 -dpratio --no_single_bands \
-    -t_srs 4326 --fill_holes
+    -o out/ \
+    -amp \
+    -projwin -120.5 37.2 -119.8 36.7 -t_srs 4326 -tr 0.0002 0.0002
 
 # Subset + amplitude + rebuild master VRTs after
 seppo_nisar_gcov_convert \
