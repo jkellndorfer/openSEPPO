@@ -1457,6 +1457,13 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
     mode_str = transform_mode if transform_mode else "pwr"
     logic_mode = mode_str.lower()
 
+    # Detect quad-pol from the polarization code in the filename (token index 9).
+    # For frequency A the pol-code occupies the first two characters (e.g. "QP" in "QPQP");
+    # for frequency B it occupies the last two characters.
+    _base_tokens = base_name.split("_")
+    _pol_code = _base_tokens[9] if len(_base_tokens) > 9 else ""
+    _is_qp = (_pol_code[:2] == "QP" if frequency == "A" else _pol_code[2:] == "QP")
+
     if verbose:
         print(f"--> Processing File: {h5_basename}", flush=True)
 
@@ -1599,7 +1606,7 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
             _ulx = x_c - abs(info["res_x"]) / 2.0
             _uly = y_c + abs(info["res_y"]) / 2.0
             _tf = from_origin(_ulx, _uly, abs(info["res_x"]), abs(info["res_y"]))
-            pol_list_str = "".join(v[:2].lower() for v in variable_names)
+            pol_list_str = "".join(v.lower() if _is_qp else v[:2].lower() for v in variable_names)
             suffix = f"-EBD_{frequency}_{pol_list_str}.h5"
             h5_out_path = (final_path[:-4] if final_path.endswith(".tif") else final_path) + suffix
 
@@ -1824,7 +1831,7 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                 band_data = band_data[0, :, :]
 
                 # Write
-                pol_str = var[:2].lower()
+                pol_str = var.lower() if _is_qp else var[:2].lower()
                 suffix = f"-EBD_{frequency}_{pol_str}_{mode_str}.tif"
 
                 if final_path.endswith(".tif"):
@@ -1851,7 +1858,7 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
 
             # VRT generation for low-memory mode
             if vrt:
-                pol_list_str = "".join([v[:2].lower() for v in variable_names])
+                pol_list_str = "".join(v.lower() if _is_qp else v[:2].lower() for v in variable_names)
                 vrt_suffix = f"-EBD_{frequency}_{pol_list_str}_{mode_str}.vrt"
 
                 if final_path.endswith(".tif"):
@@ -1915,7 +1922,7 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                     _t_write = _time.perf_counter()
                 generated_files = []
                 for i, var in enumerate(variable_names):
-                    pol_str = var[:2].lower()
+                    pol_str = var.lower() if _is_qp else var[:2].lower()
                     suffix = f"-EBD_{frequency}_{pol_str}_{mode_str}.tif"
 
                     if final_path.endswith(".tif"):
@@ -1943,7 +1950,7 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                     print(f"    [t] COG write ({len(generated_files)} bands, {sz/1e6:.1f} MB): {_time.perf_counter()-_t_write:.1f}s", flush=True)
 
                 if vrt:
-                    pol_list_str = "".join([v[:2].lower() for v in variable_names])
+                    pol_list_str = "".join(v.lower() if _is_qp else v[:2].lower() for v in variable_names)
                     vrt_suffix = f"-EBD_{frequency}_{pol_list_str}_{mode_str}.vrt"
 
                     if final_path.endswith(".tif"):
@@ -2263,9 +2270,15 @@ def rebuild_vrts(output_path, variable_names, transform_mode="AMP", frequency="A
     if not tif_files:
         return "No matching files found."
 
+    # Detect quad-pol from the polarization code in the first TIF filename (token index 9).
+    _tif_base = os.path.basename(tif_files[0]).split("-EBD_")[0]
+    _tif_tokens = _tif_base.split("_")
+    _pol_code = _tif_tokens[9] if len(_tif_tokens) > 9 else ""
+    _is_qp = (_pol_code[:2] == "QP" if frequency == "A" else _pol_code[2:] == "QP")
+
     # Get the polarizations if variable_names is None:
     if variable_names is None:
-        pols = {x.split("_")[-2][:2].upper() for x in tif_files}
+        pols = {x.split("_")[-2].upper() for x in tif_files}
         variable_names = sorted(pols)
 
     # --- 2. PARSE METADATA & GROUP ---
@@ -2288,7 +2301,7 @@ def rebuild_vrts(output_path, variable_names, transform_mode="AMP", frequency="A
         if not p_match:
             continue
         pol_found = p_match.group(1).upper()
-        key_pol = pol_found[:2]
+        key_pol = pol_found if _is_qp else pol_found[:2]
 
         entry = dates_map[ymd][key_pol]
         entry["path"] = fpath
@@ -2335,7 +2348,7 @@ def rebuild_vrts(output_path, variable_names, transform_mode="AMP", frequency="A
         base_filename = None
 
         for var in variable_names:
-            k = var[:2].upper()
+            k = var.upper() if _is_qp else var[:2].upper()
             if k in day_files:
                 ordered_files.append(day_files[k]["path"])
                 ordered_vars.append(var)
@@ -2345,7 +2358,7 @@ def rebuild_vrts(output_path, variable_names, transform_mode="AMP", frequency="A
         if not ordered_files:
             continue
 
-        pol_list_str = "".join([v[:2].lower() for v in variable_names])
+        pol_list_str = "".join(v.lower() if _is_qp else v[:2].lower() for v in variable_names)
         new_suffix = f"-EBD_{frequency}_{pol_list_str}_{mode_str}.vrt"
         base_stripped = re.sub(f"-EBD_{frequency}_[a-zA-Z0-9]+_{mode_str}.tif", "", base_filename)
         vrt_full_path = os.path.join(output_path, base_stripped + new_suffix)
