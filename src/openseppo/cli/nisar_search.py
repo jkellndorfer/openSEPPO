@@ -1,10 +1,13 @@
 #!/usr/bin/env python
 """
-seppo_nisar_earthaccess_search.py
-**********************************
-Software for Earth big data Processing, Prediction, and Organization
+seppo_nisar_search — NISAR Earthdata catalog search
+****************************************************
+openSEPPO — Open SEPPO Tools
+Supporting Geospatial and Remote Sensing Data Processing
 
-(c) 2026 Earth Big Data
+(c) 2026 Earth Big Data LLC  |  https://earthbigdata.com
+Licensed under the Apache License, Version 2.0
+https://github.com/EarthBigData/openSEPPO
 
 Author: Josef Kellndorfer
 Date: 2026-02-28

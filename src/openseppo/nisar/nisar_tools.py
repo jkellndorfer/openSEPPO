@@ -1,43 +1,19 @@
-"""SEPPO NISAR Tools - OPTIMIZED with datatree
+"""
+openseppo.nisar.nisar_tools — NISAR GCOV processing core
+*********************************************************
+openSEPPO — Open SEPPO Tools
+Supporting Geospatial and Remote Sensing Data Processing
 
-PERFORMANCE IMPROVEMENTS over h5py version:
-- Uses xarray datatree for hierarchical HDF5 access with lazy loading
-- Parallel band reading instead of sequential loops
-- Spatial subsetting before loading into memory
-- Better chunking and memory efficiency
-- All original function names and signatures preserved for compatibility
+(c) 2026 Earth Big Data LLC  |  https://earthbigdata.com
+Licensed under the Apache License, Version 2.0
+https://github.com/EarthBigData/openSEPPO
 
-# Bash prepare list
-$ smddb -A -t -c "select url from nisar_pub.gcov where track=172 and frame=65 order by start_time" -o  urls.txt'
-
-# ipython:
-with open("urls.txt","r") as f:
-    h5_urls = [x.strip() for x in f.readlines()]
-
-
-h5_url_ops = "s3://nisar-ops-rs-fwd/products/L2_L_GCOV/2026/01/21/NISAR_L2_PR_GCOV_015_172_D_065_4005_DHDH_A_20260121T031851_20260121T031926_P05006_N_F_J_001/NISAR_L2_PR_GCOV_015_172_D_065_4005_DHDH_A_20260121T031851_20260121T031926_P05006_N_F_J_001.h5"
-
-variable_names=["HHHH", "HVHV"]
-
-srcwin = [10000,10000,2000,2000]
-projwin=[500590,5183650,585620,5092470]
-
-output_auth={'profile':'josefk'}
-
-set_credentials("a")
-
-my_input_creds = {
-'key': os.environ.get('AWS_ACCESS_KEY_ID'),
-'secret': os.environ.get('AWS_SECRET_ACCESS_KEY'),
-'token': os.environ.get('AWS_SESSION_TOKEN')
-}
-
-output_path="s3://ebd-clients-w/TEST/NISAR/"
-
-process_chunk_task(h5_urls,variable_names,output_path,srcwin=None, projwin=projwin,transform_mode="amp", single_bands=True,vrt=True,output_auth=output_auth, input_auth=my_input_creds, frequency='B', downscale_factor=2, verbose=True, target_align_pixels=True)
-
-set_credentials("u")
-
+Core library for reading NISAR GCOV HDF5 files and converting them to
+Cloud Optimized GeoTIFF (COG). Supports local and S3/HTTPS sources via
+parallel streaming, with output modes: power (float32), amplitude (uint16),
+dB (float32), and DN (uint8). Includes reprojection, spatial subsetting,
+block downscaling, interior hole filling, VRT time-series stacking, and
+dual-pol ratio computation.
 """
 
 import sys
@@ -293,16 +269,13 @@ def _get_resampling(method):
 
 def _fill_nodata_nn(data_2d):
     """
-    Fill ALL NaN / ±inf pixels with the value of their nearest valid neighbour.
+    Fill interior NaN / ±inf pixels with the value of their nearest valid neighbour.
 
-    The image-frame boundary is handled naturally by the mask pass in
-    _reproject_power_band: destination pixels that fall outside the source
-    extent get mask=0 and are set to NaN regardless of this fill.
-    NaN regions connected to the image edge (layover, shadow, swath gaps)
-    are therefore filled here but restored to NaN in the output wherever
-    the destination pixel truly has no source coverage.
+    Only pixels not connected to the image-frame edge are filled.  Edge-connected
+    invalid regions (layover, shadow, swath gaps that reach the frame boundary)
+    are left as-is so they are not projected into the destination as false data.
     """
-    from scipy.ndimage import distance_transform_edt
+    from scipy.ndimage import distance_transform_edt, binary_fill_holes
 
     valid = np.isfinite(data_2d)
     if valid.all():
@@ -310,11 +283,15 @@ def _fill_nodata_nn(data_2d):
     if not valid.any():
         return data_2d  # nothing to fill from
 
+    # Interior invalid pixels: invalid and not reachable from any array border
+    interior_invalid = binary_fill_holes(valid) & ~valid
+    if not interior_invalid.any():
+        return data_2d
+
     row_idx, col_idx = distance_transform_edt(
         ~valid, return_distances=False, return_indices=True)
     result = data_2d.copy()
-    inv = ~valid
-    result[inv] = data_2d[row_idx[inv], col_idx[inv]]
+    result[interior_invalid] = data_2d[row_idx[interior_invalid], col_idx[interior_invalid]]
     return result
 
 
@@ -326,33 +303,47 @@ def _reproject_power_band(data_2d, src_transform, src_crs, dst_transform, dst_cr
 
     Two-pass approach to avoid introducing extra NaN pixels:
 
-    Pass 1 — warp the data with invalid pixels (NaN/±inf) replaced by 0 and
-              src_nodata=None.  With no declared source nodata GDAL clamps
-              out-of-bounds kernel taps to the nearest edge pixel rather than
-              treating them as NaN, preventing the 1-2 pixel NaN erosion that
-              higher-order resampling (cubic, lanczos) otherwise adds around
-              every NaN boundary.
+    Pass 1 — warp the data with invalid pixels (NaN/±inf) replaced by their
+              nearest valid neighbour value (NN fill) and src_nodata=None.
+              Using NN-filled values instead of 0 prevents the resampling
+              kernel from mixing valid data with zeros near NaN boundaries,
+              which would otherwise produce floor-clamped artefacts (e.g.
+              -40 dB) at swath edges.  With no declared source nodata GDAL
+              clamps out-of-bounds kernel taps to the nearest edge pixel
+              rather than treating them as NaN.
 
     Pass 2 — warp a binary valid-pixel mask using nearest-neighbour resampling
               so each output pixel inherits the validity of its nearest source
-              pixel with no kernel spreading.  Only pixels with no source
-              coverage at all are set to NaN in the output.
+              pixel with no kernel spreading.  Edge-connected NaN regions are
+              correctly restored to NaN in the output regardless of the Pass 1
+              fill, because the mask is derived from the original invalid pattern.
 
     fill_holes — if True, interior NaN/±inf pixels (those fully enclosed by
                  valid data, not connected to the image frame edge) are filled
-                 with their nearest valid neighbour BEFORE warping.  This
-                 prevents the cubic kernel from seeing isolated invalid pixels
-                 inside the valid image area.  Frame-boundary nodata is
+                 with their nearest valid neighbour BEFORE warping so they
+                 remain valid in the output.  Frame-boundary nodata is
                  unaffected and still propagates to NaN in the output.
     """
+    from scipy.ndimage import distance_transform_edt
+
     src = data_2d.astype(np.float32)
 
     if fill_holes:
         src = _fill_nodata_nn(src)
 
     invalid = ~np.isfinite(src)          # NaN and ±inf
-    filled = np.where(invalid, 0.0, src)
     valid = (~invalid).astype(np.float32)
+
+    # Fill ALL invalid pixels with their nearest valid neighbour for pass 1.
+    # This gives the resampling kernel physically meaningful values instead of
+    # zeros, preventing floor-clamped artefacts at swath/image boundaries.
+    if invalid.any():
+        row_idx, col_idx = distance_transform_edt(
+            invalid, return_distances=False, return_indices=True)
+        filled = src.copy()
+        filled[invalid] = src[row_idx[invalid], col_idx[invalid]]
+    else:
+        filled = src
 
     n_threads = num_threads if num_threads is not None else os.cpu_count() or 1
 
@@ -1248,6 +1239,8 @@ def inspect_h5_structure(f):
             y0, y1 = y_coord_ds[0], y_coord_ds[-1]
             res_x = x_coord_ds[1] - x_coord_ds[0]
             res_y = y_coord_ds[1] - y_coord_ds[0]
+            ncols = len(x_coord_ds)
+            nrows = len(y_coord_ds)
 
             min_x = min(x0, x1) - (abs(res_x) / 2.0)
             max_x = max(x0, x1) + (abs(res_x) / 2.0)
@@ -1279,7 +1272,15 @@ def inspect_h5_structure(f):
                     h2 = math.sqrt((xs[2] - xs[1]) ** 2 + (ys[2] - ys[1]) ** 2)
                     avg_height_km = ((h1 + h2) / 2.0) / 1000.0
 
-                    dims_km = f"Width: {avg_width_km:.2f} km, Height: {avg_height_km:.2f} km"
+                    # Detect degenerate polygon (fewer than 4 unique corners)
+                    unique_corners = len({(round(x, 1), round(y, 1)) for x, y in zip(xs, ys)})
+                    if unique_corners < 4:
+                        raster_w_km = (max_x - min_x) / 1000.0
+                        raster_h_km = (max_y - min_y) / 1000.0
+                        dims_km = (f"~{raster_w_km:.2f} km x ~{raster_h_km:.2f} km"
+                                   f" (footprint polygon incomplete; showing raster extent)")
+                    else:
+                        dims_km = f"Width: {avg_width_km:.2f} km, Height: {avg_height_km:.2f} km"
 
                 except Exception as e:
                     poly_native_display = f"Reprojection Failed: {e}"
@@ -1291,7 +1292,7 @@ def inspect_h5_structure(f):
                     if isinstance(obj, h5py.Dataset) and len(obj.shape) >= 2:
                         variables.append(item)
 
-            structure[freq_code] = {"crs": crs, "res_x": float(res_x), "res_y": float(res_y), "bbox": (min_x, min_y, max_x, max_y), "vars": sorted(variables), "poly_geo": poly_geo_display, "poly_native": poly_native_display, "dims": dims_km}
+            structure[freq_code] = {"crs": crs, "ncols": ncols, "nrows": nrows, "res_x": float(res_x), "res_y": float(res_y), "bbox": (min_x, min_y, max_x, max_y), "vars": sorted(variables), "poly_geo": poly_geo_display, "poly_native": poly_native_display, "dims": dims_km}
         except Exception as e:
             structure[freq_code] = {"error": str(e)}
 
@@ -1802,6 +1803,8 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
         # pwr/dB output is float32; AMP is uint16; DN is uint8
         _predictor = 3 if transform_mode.lower() in ("pwr", "db") else 2
         _write_extra = {"num_threads": _n_th, "predictor": _predictor}
+        if _driver == "COG":
+            _write_extra["overview_resampling"] = "average"
 
         # === LOW MEMORY MODE: Process each band individually ===
         if use_low_memory_mode:
@@ -1835,6 +1838,8 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                         print(f"        Reprojecting {var}...", flush=True)
                     band_data_2d = _reproject_power_band(band_data[0], **warp_kw)
                     band_data = band_data_2d[np.newaxis, :, :]
+                elif fill_holes:
+                    band_data[0] = _fill_nodata_nn(band_data[0])
 
                 # Get output dimensions
                 _, h_out, w_out = band_data.shape
@@ -1859,6 +1864,10 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                 # Remove band dimension for writing
                 band_data = band_data[0, :, :]
 
+                # Replace ±inf with NaN so COG overview averaging excludes them
+                if output_dtype == "float32":
+                    band_data[~np.isfinite(band_data)] = np.nan
+
                 # Write
                 pol_str = var.lower() if _is_qp else var[:2].lower()
                 suffix = f"-EBD_{frequency}_{pol_str}_{mode_str}.tif"
@@ -1870,7 +1879,7 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
 
                 profile = {"driver": _driver, "height": h_out, "width": w_out, "count": 1, "dtype": output_dtype, "crs": out_crs, "transform": out_transform, "compress": "deflate", "nodata": output_nodata, **_gtiff_extra, **_write_extra}
 
-                with rasterio.Env(GDAL_NUM_THREADS=_n_th):
+                with rasterio.Env(GDAL_NUM_THREADS=_n_th, GDAL_OVR_PROPAGATE_NODATA="NO"):
                     with MemoryFile() as memfile:
                         with memfile.open(**profile) as dst:
                             dst.write(band_data, 1)
@@ -1917,6 +1926,9 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                 for bi in range(n_bands):
                     warped[bi] = _reproject_power_band(data_stack[bi], **warp_kw)
                 data_stack = warped
+            elif fill_holes:
+                for bi in range(data_stack.shape[0]):
+                    data_stack[bi] = _fill_nodata_nn(data_stack[bi])
 
             _, h_out, w_out = data_stack.shape
 
@@ -1985,6 +1997,10 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                 processed_data = np.concatenate([processed_data, ratio_band[np.newaxis, :, :]], axis=0)
                 variable_names = list(variable_names) + [_ratio_band_name]
 
+            # Replace ±inf with NaN so COG overview averaging excludes them
+            if output_dtype == "float32":
+                processed_data[~np.isfinite(processed_data)] = np.nan
+
             if single_bands:
                 if verbose:
                     print("    Writing separate bands...", flush=True)
@@ -2004,18 +2020,19 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
 
                     band_data = processed_data[i, :, :]
 
-                    profile = {"driver": _driver, "height": h_out, "width": w_out, "count": 1, "dtype": output_dtype, "crs": out_crs, "transform": out_transform, "compress": "deflate", "nodata": output_nodata, **_gtiff_extra}
+                    profile = {"driver": _driver, "height": h_out, "width": w_out, "count": 1, "dtype": output_dtype, "crs": out_crs, "transform": out_transform, "compress": "deflate", "nodata": output_nodata, **_gtiff_extra, **_write_extra}
 
-                    with MemoryFile() as memfile:
-                        with memfile.open(**profile) as dst:
-                            dst.write(band_data, 1)
-                            dst.set_band_description(1, var)
-                            dst.update_tags(**acq_meta)
-                            dst.update_tags(1, Date=date_str)
-                        memfile.seek(0)
-                        write_bytes(band_path, memfile.read())
-                        files_map[var] = band_path
-                        generated_files.append(band_path)
+                    with rasterio.Env(GDAL_OVR_PROPAGATE_NODATA="NO"):
+                        with MemoryFile() as memfile:
+                            with memfile.open(**profile) as dst:
+                                dst.write(band_data, 1)
+                                dst.set_band_description(1, var)
+                                dst.update_tags(**acq_meta)
+                                dst.update_tags(1, Date=date_str)
+                            memfile.seek(0)
+                            write_bytes(band_path, memfile.read())
+                            files_map[var] = band_path
+                            generated_files.append(band_path)
 
                 if verbose:
                     sz = sum(os.path.getsize(p) for p in generated_files if os.path.isfile(p))
@@ -2044,7 +2061,7 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                     print("    Writing Multi-band COG...", flush=True)
                     _t_write = _time.perf_counter()
                 profile = {"driver": _driver, "height": h_out, "width": w_out, "count": len(variable_names), "dtype": output_dtype, "crs": out_crs, "transform": out_transform, "compress": "deflate", "nodata": output_nodata, **_gtiff_extra, **_write_extra}
-                with rasterio.Env(GDAL_NUM_THREADS=_n_th):
+                with rasterio.Env(GDAL_NUM_THREADS=_n_th, GDAL_OVR_PROPAGATE_NODATA="NO"):
                     with MemoryFile() as memfile:
                         with memfile.open(**profile) as dst:
                             dst.write(processed_data)
@@ -2170,6 +2187,7 @@ def process_chunk_task(h5_url, variable_names, output_path, srcwin=None, projwin
                     else:
                         print(f"  Frequency {freq}:")
                         print(f"    CRS: {details['crs']}")
+                        print(f"    Raster Size:  {details['ncols']} x {details['nrows']} pixels (cols/rows)")
                         print(f"    Resolution: X={details['res_x']:.2f}, Y={details['res_y']:.2f}")
                         # Bbox
                         bbox = details["bbox"]

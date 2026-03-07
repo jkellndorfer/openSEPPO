@@ -1,19 +1,31 @@
 #!/usr/bin/env python
 """
-SEPPO NISAR H5 to COG Converter
-Wrapper script for nisar_tools.py
+seppo_nisar_gcov_convert — NISAR GCOV HDF5 to Cloud Optimized GeoTIFF converter
+*********************************************************************************
+openSEPPO — Open SEPPO Tools
+Supporting Geospatial and Remote Sensing Data Processing
+
+(c) 2026 Earth Big Data LLC  |  https://earthbigdata.com
+Licensed under the Apache License, Version 2.0
+https://github.com/EarthBigData/openSEPPO
+
+Convert NISAR GCOV HDF5 files to Cloud Optimized GeoTIFF (COG) with optional
+reprojection, downscaling, VRT time-series stacking, and dual-pol ratio output.
 
 Usage Examples:
-1. Standard Conversion (Default Power):
+1. Standard conversion (default power, float32):
     seppo_nisar_gcov_convert --h5 urls.txt --output s3://bucket/out/
 
-2. Convert to Amplitude:
+2. Convert to amplitude (uint16):
     seppo_nisar_gcov_convert --h5 file.h5 --output out/ -amp
 
-3. Convert to DN (Scaled byte):
+3. Convert to DN (uint8, scaled 1-255):
     seppo_nisar_gcov_convert --h5 file.h5 --output out/ -DN
 
-4. Rebuild VRTs only:
+4. Reproject to WGS84, fill interior holes, cubic resampling:
+    seppo_nisar_gcov_convert --h5 file.h5 --output out/ -t_srs 4326 --fill_holes
+
+5. Rebuild VRTs only:
     seppo_nisar_gcov_convert --rebuild-only --output s3://bucket/out/ -dB
 """
 
@@ -76,10 +88,10 @@ def myargsparse(a):
     # --- Mode Flags (Mutually Exclusive) ---
     # Maps flags to 'args.mode' variable
     mode_group = parser.add_mutually_exclusive_group()
-    mode_group.add_argument("-DN", "--DN", action="store_const", dest="mode", const="DN", help="Set mode to DN (uint8 scaled 1-255).")
-    mode_group.add_argument("-amp", "--amp", action="store_const", dest="mode", const="AMP", help="Set mode to Amplitude (uint16).")
-    mode_group.add_argument("-dB", "--dB", action="store_const", dest="mode", const="dB", help="Set mode to dB (float32).")
-    mode_group.add_argument("-pwr", "--power", action="store_const", dest="mode", const="pwr", help="Set mode to Power (raw float32). Default behavior.")
+    mode_group.add_argument("-DN", "--DN", action="store_const", dest="mode", const="DN", help="Set scaling mode to DN (uint8 scaled 1-255).")
+    mode_group.add_argument("-amp", "--amp", action="store_const", dest="mode", const="AMP", help="Set scaling mode to Amplitude (uint16).")
+    mode_group.add_argument("-dB", "--dB", action="store_const", dest="mode", const="dB", help="Set scaling mode to dB (float32).")
+    mode_group.add_argument("-pwr", "--power", action="store_const", dest="mode", const="pwr", help="Set scaling mode to Power (raw float32). Default behavior.")
 
     # --- Output Format ---
     parser.add_argument("-of", "--output_format", type=str, default="COG",
@@ -103,7 +115,7 @@ def myargsparse(a):
     parser.add_argument("-t_srs", "--target_srs", type=str, default=None, help="Target CRS for output (e.g. EPSG:4326 or bare 4326). If omitted, output stays in native UTM CRS.")
     parser.add_argument("-tr", "--target_res", type=float, nargs=2, metavar=("XRES", "YRES"), default=None, help="Explicit output pixel size in target CRS units (e.g. -tr 0.001 0.001 for ~100m in degrees). Only used with --target_srs.")
     parser.add_argument("--resample", type=str, default="cubic", help="Resampling method for reprojection (nearest/bilinear/cubic/cubicspline/lanczos/average). Default: cubic.")
-    parser.add_argument("--fill_holes", action="store_true", help="Before reprojection, fill interior NaN/±inf pixels (those enclosed by valid data) with their nearest valid neighbour. Frame-boundary nodata is unaffected. Prevents the resampling kernel from seeing isolated invalid pixels inside the valid image area.")
+    parser.add_argument("--fill_holes", action="store_true", help="Fill interior NaN/±inf pixels (those enclosed by valid data) with their nearest valid neighbour. Frame-boundary nodata is unaffected. Prevents the resampling kernel from seeing isolated invalid pixels inside the valid image area.")
     parser.add_argument("--warp_threads", type=int, default=None, metavar="N", help="Number of threads for reprojection. Default: all available CPU cores.")
     parser.add_argument("--read_threads", type=int, default=8, metavar="N", help="Number of parallel S3/HTTPS connections for reading HDF5 chunks. Each band×stripe gets its own connection. Default: 8.")
 
@@ -111,20 +123,19 @@ def myargsparse(a):
     parser.add_argument("--profile", type=str, help="AWS Profile name (applies to both Input and Output unless overridden).")
     parser.add_argument("--input_profile", type=str, help="AWS Profile specifically for reading Input H5s.")
     parser.add_argument("--output_profile", type=str, help="AWS Profile specifically for writing Output COGs.")
-    parser.add_argument("--use_earthdata", action="store_true", help="Use Earthdata Login for Input H5 access (ignores input profiles). Defaults to True if ASF NISAR buckets are detected.")
-
     # --- Management Flags ---
-    parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging.")
     parser.add_argument("-ro", "--rebuild_only", action="store_true", help="Skip processing and ONLY rebuild VRTs in the output folder.")
-    parser.add_argument("-R", "--rebuild_all_vrts", action="store_true", help="After processing the new files, scan the output folder and rebuild the master VRTs to include ALL timesteps (old + new).")
-    parser.add_argument("-cache", "--cache", default=None, action="store", help="Path to cache directory to cache files locally first. Accepts 'y' or 'yes' to make a temporary directory first.")
+    parser.add_argument("-R", "--rebuild_all_vrts", action="store_true", help="After processing the new files, scan the output folder and (re)build the master VRTs to include ALL timesteps (old + new).")
+    parser.add_argument("-cache", "--cache", default=None, action="store", help="Local path to a directory to cache files from urls first. Accepts 'y' or 'yes' to create a local temp directory (on /dev/shm or /tmp if available).")
     parser.add_argument("-keep", "--keep_cached", action="store_true", help="Use with -cache to keep to cached h5 file locally.")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output.")
 
     # Set Defaults
     parser.set_defaults(single_bands=True)
     parser.set_defaults(mode="pwr")  # Default to power if no flag set
 
     args = seppo_parse_args(parser, a)
+    args.use_earthdata = False  # auto-detected later in processing() based on input URLs
 
     if args.verbose:
         pprint(vars(args))
@@ -596,7 +607,7 @@ def processing(args):
         print("\n" + str(result))
 
         # 5. Build per-track (and combined A+D) time-series VRTs
-        if not args.no_time_series:
+        if not args.no_time_series and not args.list_grids and args.output:
             print("\nBuilding per-track time series VRTs...")
             build_track_vrts(
                 output_path=args.output,
