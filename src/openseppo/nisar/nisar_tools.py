@@ -1,43 +1,19 @@
-"""SEPPO NISAR Tools - OPTIMIZED with datatree
+"""
+openseppo.nisar.nisar_tools — NISAR GCOV processing core
+*********************************************************
+openSEPPO — Open SEPPO Tools
+Supporting Geospatial and Remote Sensing Data Processing
 
-PERFORMANCE IMPROVEMENTS over h5py version:
-- Uses xarray datatree for hierarchical HDF5 access with lazy loading
-- Parallel band reading instead of sequential loops
-- Spatial subsetting before loading into memory
-- Better chunking and memory efficiency
-- All original function names and signatures preserved for compatibility
+(c) 2026 Earth Big Data LLC  |  https://earthbigdata.com
+Licensed under the Apache License, Version 2.0
+https://github.com/EarthBigData/openSEPPO
 
-# Bash prepare list
-$ smddb -A -t -c "select url from nisar_pub.gcov where track=172 and frame=65 order by start_time" -o  urls.txt'
-
-# ipython:
-with open("urls.txt","r") as f:
-    h5_urls = [x.strip() for x in f.readlines()]
-
-
-h5_url_ops = "s3://nisar-ops-rs-fwd/products/L2_L_GCOV/2026/01/21/NISAR_L2_PR_GCOV_015_172_D_065_4005_DHDH_A_20260121T031851_20260121T031926_P05006_N_F_J_001/NISAR_L2_PR_GCOV_015_172_D_065_4005_DHDH_A_20260121T031851_20260121T031926_P05006_N_F_J_001.h5"
-
-variable_names=["HHHH", "HVHV"]
-
-srcwin = [10000,10000,2000,2000]
-projwin=[500590,5183650,585620,5092470]
-
-output_auth={'profile':'josefk'}
-
-set_credentials("a")
-
-my_input_creds = {
-'key': os.environ.get('AWS_ACCESS_KEY_ID'),
-'secret': os.environ.get('AWS_SECRET_ACCESS_KEY'),
-'token': os.environ.get('AWS_SESSION_TOKEN')
-}
-
-output_path="s3://ebd-clients-w/TEST/NISAR/"
-
-process_chunk_task(h5_urls,variable_names,output_path,srcwin=None, projwin=projwin,transform_mode="amp", single_bands=True,vrt=True,output_auth=output_auth, input_auth=my_input_creds, frequency='B', downscale_factor=2, verbose=True, target_align_pixels=True)
-
-set_credentials("u")
-
+Core library for reading NISAR GCOV HDF5 files and converting them to
+Cloud Optimized GeoTIFF (COG). Supports local and S3/HTTPS sources via
+parallel streaming, with output modes: power (float32), amplitude (uint16),
+dB (float32), and DN (uint8). Includes reprojection, spatial subsetting,
+block downscaling, interior hole filling, VRT time-series stacking, and
+dual-pol ratio computation.
 """
 
 import sys

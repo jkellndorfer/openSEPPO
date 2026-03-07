@@ -1,15 +1,19 @@
 """
 openSEPPO — Open SEPPO Tools
+Supporting Geospatial and Remote Sensing Data Processing
 
-Geospatial and SAR processing utilities organized into subpackages mirroring
-the SEPPO module structure:
+(c) 2026 Earth Big Data LLC  |  https://earthbigdata.com
+Licensed under the Apache License, Version 2.0
+https://github.com/EarthBigData/openSEPPO
 
-    openseppo.core          — core utilities (I/O, naming, datetime helpers)
-    openseppo.geospatial    — raster, vector, sensors, tsa, tools
-    openseppo.cloud         — cloud storage (AWS S3, Wasabi)
-    openseppo.parsers       — file/metadata parsers
-    openseppo.ui            — user-interaction helpers
-    openseppo.cli           — command-line entry points
+Geospatial and SAR processing utilities. The tools are designed to scale
+readily with the SEPPO (Scalable EO Processing Platform) software by
+Earth Big Data (https://earthbigdata.com/seppo).
+
+Subpackages
+-----------
+openseppo.nisar   — NISAR GCOV data search, download, and COG conversion
+openseppo.cli     — Command-line entry points
 """
 
 from importlib.metadata import version, PackageNotFoundError

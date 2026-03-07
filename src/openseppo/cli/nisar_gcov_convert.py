@@ -1,19 +1,31 @@
 #!/usr/bin/env python
 """
-SEPPO NISAR H5 to COG Converter
-Wrapper script for nisar_tools.py
+seppo_nisar_gcov_convert — NISAR GCOV HDF5 to Cloud Optimized GeoTIFF converter
+*********************************************************************************
+openSEPPO — Open SEPPO Tools
+Supporting Geospatial and Remote Sensing Data Processing
+
+(c) 2026 Earth Big Data LLC  |  https://earthbigdata.com
+Licensed under the Apache License, Version 2.0
+https://github.com/EarthBigData/openSEPPO
+
+Convert NISAR GCOV HDF5 files to Cloud Optimized GeoTIFF (COG) with optional
+reprojection, downscaling, VRT time-series stacking, and dual-pol ratio output.
 
 Usage Examples:
-1. Standard Conversion (Default Power):
+1. Standard conversion (default power, float32):
     seppo_nisar_gcov_convert --h5 urls.txt --output s3://bucket/out/
 
-2. Convert to Amplitude:
+2. Convert to amplitude (uint16):
     seppo_nisar_gcov_convert --h5 file.h5 --output out/ -amp
 
-3. Convert to DN (Scaled byte):
+3. Convert to DN (uint8, scaled 1-255):
     seppo_nisar_gcov_convert --h5 file.h5 --output out/ -DN
 
-4. Rebuild VRTs only:
+4. Reproject to WGS84, fill interior holes, cubic resampling:
+    seppo_nisar_gcov_convert --h5 file.h5 --output out/ -t_srs 4326 --fill_holes
+
+5. Rebuild VRTs only:
     seppo_nisar_gcov_convert --rebuild-only --output s3://bucket/out/ -dB
 """
 

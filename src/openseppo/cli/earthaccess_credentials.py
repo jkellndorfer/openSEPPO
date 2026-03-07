@@ -1,7 +1,15 @@
 #!/usr/bin/env python
-"""Set and unset temporary NASA Earthaccess AWS envtironment variables
+"""
+seppo_earthaccess_credentials — NASA Earthdata temporary AWS credential helper
+*****************************************************************************
+openSEPPO — Open SEPPO Tools
+Supporting Geospatial and Remote Sensing Data Processing
 
-(c) 2026 Earth Big Data
+(c) 2026 Earth Big Data LLC  |  https://earthbigdata.com
+Licensed under the Apache License, Version 2.0
+https://github.com/EarthBigData/openSEPPO
+
+Set and unset temporary NASA Earthdata AWS environment variables.
 
 Usage:
 
