@@ -272,6 +272,161 @@ seppo_nisar_gcov_convert -i file.h5 -o out/ -v
 
 ---
 
+## File naming conventions
+
+All output files preserve the original NISAR HDF5 base name and append an
+`-EBD_<freq>_<pol>_<mode>` suffix before the file extension.
+
+### NISAR base name tokens
+
+The input HDF5 filename encodes acquisition metadata in 15 underscore-separated tokens:
+
+```
+NISAR_<il>_<pt>_<prod>_<cycle>_<track>_<dir>_<frame>_<mode>_<pol>_<obs>_<start>_<end>_<crid>_<acc>
+```
+
+| Position | Token | Example | Description |
+|----------|-------|---------|-------------|
+| 1 | `il` | `L` | Instrument line |
+| 2 | `pt` | `S` | Product type |
+| 3 | `prod` | `GCOV` | Product name |
+| 4 | `cycle` | `001` | Cycle number (3-digit) |
+| 5 | `track` | `064` | Track number (3-digit) |
+| 6 | `dir` | `A` / `D` | Pass direction: Ascending / Descending |
+| 7 | `frame` | `003` | Frame number (3-digit) |
+| 8 | `mode` | `2000` | Radar mode |
+| 9 | `pol` | `SV`, `DH`, `DV`, `QPQP` | Polarization code |
+| 10 | `obs` | `20` | Observation mode |
+| 11 | `start` | `20250301T120000` | Acquisition start time (UTC) |
+| 12 | `end` | `20250301T120045` | Acquisition end time (UTC) |
+| 13 | `crid` | `P00001` | Composite Release ID |
+| 14 | `acc` | `M` | Accuracy flag |
+
+### EBD suffix and polarization naming
+
+The `-EBD_<freq>_<pol>_<mode>` suffix is appended to the NISAR base name.
+
+The `pol` field uses **2-character** lowercase prefixes for single- and dual-pol acquisitions
+(`HHHH` → `hh`, `HVHV` → `hv`, etc.), and **full 4-character** lowercase variable names
+for quad-pol (QP) acquisitions (`HHHH` → `hhhh`, `HHVV` → `hhvv`, etc.).
+
+QP is detected from token 9 of the filename: frequency A → starts with `QP` (e.g. `QPQP`);
+frequency B → ends with `QP`.
+
+| Acquisition | Example `-vars` | `pol` per file |
+|-------------|-----------------|----------------|
+| DH dual-pol | `HHHH HVHV` | `hh`, `hv` |
+| DV dual-pol | `VVVV VHVH` | `vv`, `vh` |
+| QP | `HHHH VVVV HHVV` | `hhhh`, `vvvv`, `hhvv` |
+
+For multi-band output (`--no_single_bands`) the `pol` field is the concatenation of all
+per-band pol strings in extraction order:
+
+| Acquisition | Example `-vars` | multi-band `pol` |
+|-------------|-----------------|------------------|
+| DH dual-pol | `HHHH HVHV` | `hhhv` |
+| QP | `HHHH VVVV HHVV` | `hhhhvvvvhhvv` |
+
+The `mode` field matches the output mode flag: `pwr`, `dB`, `AMP`, `DN`.
+
+### Single-band COG (default)
+
+```
+# DH dual-pol:
+<NISAR_BASE>-EBD_A_hh_dB.tif
+<NISAR_BASE>-EBD_A_hv_dB.tif
+
+# QP (-vars HHHH VVVV HHVV):
+<NISAR_BASE>-EBD_A_hhhh_pwr.tif
+<NISAR_BASE>-EBD_A_vvvv_pwr.tif
+<NISAR_BASE>-EBD_A_hhvv_pwr.tif
+```
+
+### Multi-band COG (`--no_single_bands`)
+
+```
+# DH dual-pol:
+<NISAR_BASE>-EBD_A_hhhv_dB.tif
+
+# QP (-vars HHHH VVVV HHVV):
+<NISAR_BASE>-EBD_A_hhhhvvvvhhvv_pwr.tif
+```
+
+### Dual-pol ratio (`-dpratio`)
+
+Three files: like-pol, cross-pol, and ratio band:
+
+```
+<NISAR_BASE>-EBD_A_hh_dB.tif
+<NISAR_BASE>-EBD_A_hv_dB.tif
+<NISAR_BASE>-EBD_A_hhhvra_dB.tif   # DH: HHHH/HVHV
+```
+
+With `--no_single_bands`, a single 3-band COG (band 1 = like-pol, 2 = cross-pol, 3 = ratio):
+
+```
+<NISAR_BASE>-EBD_A_hhhvra_dB.tif
+```
+
+### HDF5 subset (`-of h5`)
+
+```
+<NISAR_BASE>-EBD_A_hhhv.h5
+```
+
+### Per-snapshot VRT
+
+One VRT per acquisition covering all polarizations:
+
+```
+<NISAR_BASE>-EBD_A_hhhv_dB.vrt
+```
+
+### Per-track time-series VRT
+
+Built after processing; spans all cycles on the same track and direction.
+Cycle and frame ranges appear as `min-max` when more than one value is present:
+
+```
+NISAR_<il>_<pt>_<prod>_<cycle_range>_<track>_<dir>_<frame_range>_<mode>_<pol>_<obs>_<min_start>_<max_end>_<acc>_<crid_prefix>-EBD_<freq>_<pol>_<mode>.vrt
+```
+
+Example (track 064 ascending, cycles 001–005):
+
+```
+NISAR_L_S_GCOV_001-005_064_A_003_2000_DH_20_20250101T120000_20251201T120000_M_P-EBD_A_hh_dB.vrt
+```
+
+### Spatial mosaic VRT (multiple frames per cycle)
+
+When a track covers multiple frames, a per-cycle mosaic VRT is built first and used
+as a source for the time-series VRT:
+
+```
+NISAR_..._<cycle>_<track>_<dir>_<frame_min>-<frame_max>_...-EBD_<freq>_<pol>_<mode>_mosaic.vrt
+```
+
+### Combined ascending + descending time-series VRT
+
+When exactly one ascending and one descending track are present in the output folder,
+an additional combined VRT is built that interleaves both pass directions chronologically.
+Track and direction fields span both:
+
+```
+NISAR_..._<track_A>-<track_D>_A-D_...-EBD_<freq>_<pol>_<mode>.vrt
+```
+
+### Dates sidecar file
+
+Each time-series VRT is accompanied by a `.dates` file listing one acquisition
+date per line (ISO `YYYY-MM-DD`), in band order:
+
+```
+<time_series_vrt_name>.dates
+```
+
+---
+
 ## Common combined workflows
 
 ```bash
