@@ -961,7 +961,8 @@ def _s3_stripe_worker(task):
     s3_file = fs.open(file_url, mode="rb", cache_type="bytes", block_size=16 * 1024 * 1024)
     fh = h5py.File(s3_file, driver="fileobj", mode="r", libver="latest", rdcc_nbytes=0)
     try:
-        data = fh[ds_path][r_start:r_end, col : col + w].astype(np.float32)
+        _raw = fh[ds_path][r_start:r_end, col : col + w]
+        data = np.abs(_raw).astype(np.float32) if np.iscomplexobj(_raw) else _raw.astype(np.float32)
         return ds_path, r_start - row, data
     finally:
         fh.close()
@@ -1019,7 +1020,8 @@ def _read_bands_parallel(file_url, input_fs, grid_path, variable_names, row, h, 
         try:
             for var in variable_names:
                 ds_path = f"{grid_path}/{var}"
-                out_arrays[var] = fh[ds_path][row : row + h, col : col + w].astype(np.float32)
+                _raw = fh[ds_path][row : row + h, col : col + w]
+                out_arrays[var] = np.abs(_raw).astype(np.float32) if np.iscomplexobj(_raw) else _raw.astype(np.float32)
         finally:
             fh.close()
 
