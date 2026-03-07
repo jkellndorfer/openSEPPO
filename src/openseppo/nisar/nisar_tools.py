@@ -1861,6 +1861,10 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                 # Remove band dimension for writing
                 band_data = band_data[0, :, :]
 
+                # Replace ±inf with NaN so COG overview averaging excludes them
+                if output_dtype == "float32":
+                    band_data[~np.isfinite(band_data)] = np.nan
+
                 # Write
                 pol_str = var.lower() if _is_qp else var[:2].lower()
                 suffix = f"-EBD_{frequency}_{pol_str}_{mode_str}.tif"
@@ -1872,7 +1876,7 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
 
                 profile = {"driver": _driver, "height": h_out, "width": w_out, "count": 1, "dtype": output_dtype, "crs": out_crs, "transform": out_transform, "compress": "deflate", "nodata": output_nodata, **_gtiff_extra, **_write_extra}
 
-                with rasterio.Env(GDAL_NUM_THREADS=_n_th):
+                with rasterio.Env(GDAL_NUM_THREADS=_n_th, GDAL_OVR_PROPAGATE_NODATA="NO"):
                     with MemoryFile() as memfile:
                         with memfile.open(**profile) as dst:
                             dst.write(band_data, 1)
@@ -1987,6 +1991,10 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                 processed_data = np.concatenate([processed_data, ratio_band[np.newaxis, :, :]], axis=0)
                 variable_names = list(variable_names) + [_ratio_band_name]
 
+            # Replace ±inf with NaN so COG overview averaging excludes them
+            if output_dtype == "float32":
+                processed_data[~np.isfinite(processed_data)] = np.nan
+
             if single_bands:
                 if verbose:
                     print("    Writing separate bands...", flush=True)
@@ -2008,16 +2016,17 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
 
                     profile = {"driver": _driver, "height": h_out, "width": w_out, "count": 1, "dtype": output_dtype, "crs": out_crs, "transform": out_transform, "compress": "deflate", "nodata": output_nodata, **_gtiff_extra, **_write_extra}
 
-                    with MemoryFile() as memfile:
-                        with memfile.open(**profile) as dst:
-                            dst.write(band_data, 1)
-                            dst.set_band_description(1, var)
-                            dst.update_tags(**acq_meta)
-                            dst.update_tags(1, Date=date_str)
-                        memfile.seek(0)
-                        write_bytes(band_path, memfile.read())
-                        files_map[var] = band_path
-                        generated_files.append(band_path)
+                    with rasterio.Env(GDAL_OVR_PROPAGATE_NODATA="NO"):
+                        with MemoryFile() as memfile:
+                            with memfile.open(**profile) as dst:
+                                dst.write(band_data, 1)
+                                dst.set_band_description(1, var)
+                                dst.update_tags(**acq_meta)
+                                dst.update_tags(1, Date=date_str)
+                            memfile.seek(0)
+                            write_bytes(band_path, memfile.read())
+                            files_map[var] = band_path
+                            generated_files.append(band_path)
 
                 if verbose:
                     sz = sum(os.path.getsize(p) for p in generated_files if os.path.isfile(p))
@@ -2046,7 +2055,7 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                     print("    Writing Multi-band COG...", flush=True)
                     _t_write = _time.perf_counter()
                 profile = {"driver": _driver, "height": h_out, "width": w_out, "count": len(variable_names), "dtype": output_dtype, "crs": out_crs, "transform": out_transform, "compress": "deflate", "nodata": output_nodata, **_gtiff_extra, **_write_extra}
-                with rasterio.Env(GDAL_NUM_THREADS=_n_th):
+                with rasterio.Env(GDAL_NUM_THREADS=_n_th, GDAL_OVR_PROPAGATE_NODATA="NO"):
                     with MemoryFile() as memfile:
                         with memfile.open(**profile) as dst:
                             dst.write(processed_data)
