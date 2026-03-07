@@ -1448,7 +1448,7 @@ def pwr_to_amp(pwr, scale_factor=10**8.3):
 # =========================================================
 
 
-def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, projwin, transform_mode, frequency, single_bands, vrt, downscale_factor, target_align_pixels, input_fs, output_fs, is_batch=False, cache=None, keep=False, use_earthdata=False, verbose=False, target_srs=None, target_res=None, resample="cubic", output_format="COG", fill_holes=False, num_threads=None, read_threads=8):
+def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, projwin, transform_mode, frequency, single_bands, vrt, downscale_factor, target_align_pixels, input_fs, output_fs, is_batch=False, cache=None, keep=False, use_earthdata=False, verbose=False, target_srs=None, target_res=None, resample="cubic", output_format="COG", fill_holes=False, num_threads=None, read_threads=8, dualpol_ratio=False):
 
     h5_basename = h5_url.split("/")[-1]
     base_name = h5_basename[:-3] if h5_basename.lower().endswith(".h5") else h5_basename
@@ -1465,6 +1465,25 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
     _base_tokens = base_name.split("_")
     _pol_code = _base_tokens[9] if len(_base_tokens) > 9 else ""
     _is_qp = (_pol_code[:2] == "QP" if frequency == "A" else _pol_code[2:] == "QP")
+
+    # Dual-pol ratio setup: validate pol mode and determine numerator/denominator variables.
+    _ratio_pol_override = None  # EBD pol string to use in output filenames (e.g. "hhhvra")
+    _ratio_band_name = None     # Band description written into TIF metadata (e.g. "HHHH/HVHV")
+    _ratio_num_var = None
+    _ratio_den_var = None
+    if dualpol_ratio:
+        _pol_freq_code = _pol_code[:2] if frequency == "A" else _pol_code[2:]
+        if _pol_freq_code == "DH":
+            _ratio_num_var, _ratio_den_var = "HHHH", "HVHV"
+            _ratio_pol_override = "hhhvra"
+            _ratio_band_name = "HHHH/HVHV"
+        elif _pol_freq_code == "DV":
+            _ratio_num_var, _ratio_den_var = "VVVV", "VHVH"
+            _ratio_pol_override = "vvvhra"
+            _ratio_band_name = "VVVV/VHVH"
+        else:
+            print(f"Warning: --dualpol_ratio requires DH or DV polarization mode, got '{_pol_code}'. Skipping {h5_basename}.", file=sys.stderr)
+            return {"success": False, "h5_url": h5_url, "error": f"dualpol_ratio requires DH or DV mode, got {_pol_code}"}
 
     if verbose:
         print(f"--> Processing File: {h5_basename}", flush=True)
@@ -1634,8 +1653,9 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                     "info": {"w": w, "h": h, "transform": _tf, "crs": info["crs"], "dtype": "float32"}}
 
         # MEMORY OPTIMIZATION: When using cache with single_bands, process one variable at a time
-        # to reduce memory footprint (important for large files on smaller RAM)
-        use_low_memory_mode = (cache is not None and single_bands)
+        # to reduce memory footprint (important for large files on smaller RAM).
+        # dualpol_ratio requires both bands in memory simultaneously, so force normal mode.
+        use_low_memory_mode = (cache is not None and single_bands) and not dualpol_ratio
 
         if use_low_memory_mode:
             if verbose:
@@ -1900,30 +1920,80 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
 
             _, h_out, w_out = data_stack.shape
 
-            # --- TRANSFORM LOGIC ---
+            # --- TRANSFORM LOGIC (with optional dual-pol ratio per mode) ---
             if verbose:
                 print(f"    Transforming: {mode_str} (Mode: {logic_mode})", flush=True)
 
-            if logic_mode == "amp":
-                processed_data = pwr_to_amp(data_stack)
-                output_dtype = "uint16"
-                output_nodata = 0
+            if dualpol_ratio and _ratio_pol_override:
+                num_idx = variable_names.index(_ratio_num_var)
+                den_idx = variable_names.index(_ratio_den_var)
 
-            elif logic_mode == "dn":
-                processed_data = power_to_dn_uint8(data_stack)
-                output_dtype = "uint8"
-                output_nodata = 0
+                if logic_mode == "amp":
+                    # (amp_likepol / amp_crosspol) * 1000 → uint16, nodata=0, clamp [1, 65535]
+                    amp_stack = pwr_to_amp(data_stack)
+                    with np.errstate(divide="ignore", invalid="ignore"):
+                        ratio_data = (amp_stack[num_idx] / amp_stack[den_idx] * 1000.0)
+                    nodata_mask = ~np.isfinite(ratio_data) | (amp_stack[den_idx] == 0)
+                    ratio_data = np.clip(ratio_data, 1, 65535)
+                    ratio_data[nodata_mask] = 0
+                    processed_data = ratio_data[np.newaxis, :, :].astype(np.uint16)
+                    output_dtype = "uint16"
+                    output_nodata = 0
 
-            elif logic_mode == "db":
-                processed_data = power_to_db_float32(data_stack)
-                output_dtype = "float32"
-                output_nodata = np.nan
+                elif logic_mode == "dn":
+                    # dn_likepol - dn_crosspol + 127 → uint8, nodata=0, clamp [1, 255]
+                    dn_stack = power_to_dn_uint8(data_stack).astype(np.float32)
+                    ratio_data = dn_stack[num_idx] - dn_stack[den_idx] + 127.0
+                    nodata_mask = (dn_stack[num_idx] == 0) | (dn_stack[den_idx] == 0)
+                    ratio_data = np.clip(ratio_data, 1, 255)
+                    ratio_data[nodata_mask] = 0
+                    processed_data = ratio_data[np.newaxis, :, :].astype(np.uint8)
+                    output_dtype = "uint8"
+                    output_nodata = 0
+
+                elif logic_mode == "db":
+                    # dB_likepol - dB_crosspol → float32
+                    db_stack = power_to_db_float32(data_stack)
+                    ratio_data = (db_stack[num_idx] - db_stack[den_idx]).astype(np.float32)
+                    processed_data = ratio_data[np.newaxis, :, :]
+                    output_dtype = "float32"
+                    output_nodata = np.nan
+
+                else:
+                    # pwr: likepol / crosspol → float32
+                    with np.errstate(divide="ignore", invalid="ignore"):
+                        ratio_data = np.where(
+                            data_stack[den_idx] != 0,
+                            data_stack[num_idx] / data_stack[den_idx],
+                            np.nan,
+                        ).astype(np.float32)
+                    processed_data = ratio_data[np.newaxis, :, :]
+                    output_dtype = "float32"
+                    output_nodata = np.nan
+
+                variable_names = [_ratio_band_name]
 
             else:
-                # No Transform ("pwr" or None)
-                processed_data = data_stack
-                output_dtype = "float32"
-                output_nodata = np.nan
+                if logic_mode == "amp":
+                    processed_data = pwr_to_amp(data_stack)
+                    output_dtype = "uint16"
+                    output_nodata = 0
+
+                elif logic_mode == "dn":
+                    processed_data = power_to_dn_uint8(data_stack)
+                    output_dtype = "uint8"
+                    output_nodata = 0
+
+                elif logic_mode == "db":
+                    processed_data = power_to_db_float32(data_stack)
+                    output_dtype = "float32"
+                    output_nodata = np.nan
+
+                else:
+                    # No Transform ("pwr" or None)
+                    processed_data = data_stack
+                    output_dtype = "float32"
+                    output_nodata = np.nan
 
             if single_bands:
                 if verbose:
@@ -1931,7 +2001,7 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                     _t_write = _time.perf_counter()
                 generated_files = []
                 for i, var in enumerate(variable_names):
-                    pol_str = var.lower() if _is_qp else var[:2].lower()
+                    pol_str = _ratio_pol_override if _ratio_pol_override else (var.lower() if _is_qp else var[:2].lower())
                     suffix = f"-EBD_{frequency}_{pol_str}_{mode_str}.tif"
 
                     if final_path.endswith(".tif"):
@@ -1959,7 +2029,7 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                     print(f"    [t] COG write ({len(generated_files)} bands, {sz/1e6:.1f} MB): {_time.perf_counter()-_t_write:.1f}s", flush=True)
 
                 if vrt:
-                    pol_list_str = "".join(v.lower() if _is_qp else v[:2].lower() for v in variable_names)
+                    pol_list_str = _ratio_pol_override if _ratio_pol_override else "".join(v.lower() if _is_qp else v[:2].lower() for v in variable_names)
                     vrt_suffix = f"-EBD_{frequency}_{pol_list_str}_{mode_str}.vrt"
 
                     if final_path.endswith(".tif"):
@@ -2033,7 +2103,7 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
 # =========================================================
 
 
-def process_chunk_task(h5_url, variable_names, output_path, srcwin=None, projwin=None, transform_mode="db", frequency="A", single_bands=False, vrt=False, downscale_factor=None, target_align_pixels=False, input_auth=None, output_auth=None, time_series_vrt=True, list_grids=False, cache=None, keep=False, verbose=False, target_srs=None, target_res=None, resample="cubic", output_format="COG", fill_holes=False, num_threads=None, read_threads=8):
+def process_chunk_task(h5_url, variable_names, output_path, srcwin=None, projwin=None, transform_mode="db", frequency="A", single_bands=False, vrt=False, downscale_factor=None, target_align_pixels=False, input_auth=None, output_auth=None, time_series_vrt=True, list_grids=False, cache=None, keep=False, verbose=False, target_srs=None, target_res=None, resample="cubic", output_format="COG", fill_holes=False, num_threads=None, read_threads=8, dualpol_ratio=False):
 
     use_earthdata = False
     if input_auth is None:
@@ -2153,7 +2223,7 @@ def process_chunk_task(h5_url, variable_names, output_path, srcwin=None, projwin
             output_fs = create_s3_fs(output_auth)
 
         for url in urls:
-            res = _process_single_file(url, variable_names, output_path, srcwin, projwin, transform_mode, frequency, single_bands, vrt, downscale_factor, target_align_pixels, input_fs, output_fs, is_batch=is_batch, cache=cache, keep=keep, use_earthdata=use_earthdata, verbose=verbose, target_srs=target_srs, target_res=target_res, resample=resample, output_format=output_format, fill_holes=fill_holes, num_threads=num_threads, read_threads=read_threads)
+            res = _process_single_file(url, variable_names, output_path, srcwin, projwin, transform_mode, frequency, single_bands, vrt, downscale_factor, target_align_pixels, input_fs, output_fs, is_batch=is_batch, cache=cache, keep=keep, use_earthdata=use_earthdata, verbose=verbose, target_srs=target_srs, target_res=target_res, resample=resample, output_format=output_format, fill_holes=fill_holes, num_threads=num_threads, read_threads=read_threads, dualpol_ratio=dualpol_ratio)
             results_meta.append(res)
 
         if is_batch and time_series_vrt and output_format.lower() != "h5":
