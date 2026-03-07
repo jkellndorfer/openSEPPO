@@ -1239,6 +1239,8 @@ def inspect_h5_structure(f):
             y0, y1 = y_coord_ds[0], y_coord_ds[-1]
             res_x = x_coord_ds[1] - x_coord_ds[0]
             res_y = y_coord_ds[1] - y_coord_ds[0]
+            ncols = len(x_coord_ds)
+            nrows = len(y_coord_ds)
 
             min_x = min(x0, x1) - (abs(res_x) / 2.0)
             max_x = max(x0, x1) + (abs(res_x) / 2.0)
@@ -1270,7 +1272,15 @@ def inspect_h5_structure(f):
                     h2 = math.sqrt((xs[2] - xs[1]) ** 2 + (ys[2] - ys[1]) ** 2)
                     avg_height_km = ((h1 + h2) / 2.0) / 1000.0
 
-                    dims_km = f"Width: {avg_width_km:.2f} km, Height: {avg_height_km:.2f} km"
+                    # Detect degenerate polygon (fewer than 4 unique corners)
+                    unique_corners = len({(round(x, 1), round(y, 1)) for x, y in zip(xs, ys)})
+                    if unique_corners < 4:
+                        raster_w_km = (max_x - min_x) / 1000.0
+                        raster_h_km = (max_y - min_y) / 1000.0
+                        dims_km = (f"~{raster_w_km:.2f} km x ~{raster_h_km:.2f} km"
+                                   f" (footprint polygon incomplete; showing raster extent)")
+                    else:
+                        dims_km = f"Width: {avg_width_km:.2f} km, Height: {avg_height_km:.2f} km"
 
                 except Exception as e:
                     poly_native_display = f"Reprojection Failed: {e}"
@@ -1282,7 +1292,7 @@ def inspect_h5_structure(f):
                     if isinstance(obj, h5py.Dataset) and len(obj.shape) >= 2:
                         variables.append(item)
 
-            structure[freq_code] = {"crs": crs, "res_x": float(res_x), "res_y": float(res_y), "bbox": (min_x, min_y, max_x, max_y), "vars": sorted(variables), "poly_geo": poly_geo_display, "poly_native": poly_native_display, "dims": dims_km}
+            structure[freq_code] = {"crs": crs, "ncols": ncols, "nrows": nrows, "res_x": float(res_x), "res_y": float(res_y), "bbox": (min_x, min_y, max_x, max_y), "vars": sorted(variables), "poly_geo": poly_geo_display, "poly_native": poly_native_display, "dims": dims_km}
         except Exception as e:
             structure[freq_code] = {"error": str(e)}
 
@@ -2177,6 +2187,7 @@ def process_chunk_task(h5_url, variable_names, output_path, srcwin=None, projwin
                     else:
                         print(f"  Frequency {freq}:")
                         print(f"    CRS: {details['crs']}")
+                        print(f"    Raster Size:  {details['ncols']} x {details['nrows']} pixels (cols/rows)")
                         print(f"    Resolution: X={details['res_x']:.2f}, Y={details['res_y']:.2f}")
                         # Bbox
                         bbox = details["bbox"]
