@@ -342,7 +342,7 @@ of frequency A (first 2 chars) and frequency B (last 2 chars):
 | `SV` | Single V-pol |
 | `DH` | Dual H-pol (HH + HV) |
 | `DV` | Dual V-pol (VV + VH) |
-| `QP` | Quad-pol (HH + HV + VV + VH) |
+| `QP` | Quad-pol — diagonal elements (HHHH, HVHV, VHVH, VVVV) and off-diagonal elements (HHHV, HHVH, HHVV, HVVH, HVVV, VHVV) |
 | `NA` | Frequency not operated |
 
 Examples: `DHDH` (both frequencies dual-H), `SHNA` (freq A single-H, freq B off),
@@ -350,13 +350,13 @@ Examples: `DHDH` (both frequencies dual-H), `SHNA` (freq A single-H, freq B off)
 
 ### EBD suffix and polarization naming
 
-The `-EBD_<freq>_<pol>_<mode>` suffix is appended to the NISAR base name.
+The `-EBD_<freq>_<pol>_<scaling>` suffix is appended to the NISAR base name.
 
 The `pol` field uses **2-character** lowercase prefixes for single- and dual-pol acquisitions
 (`HHHH` → `hh`, `HVHV` → `hv`, etc.), and **full 4-character** lowercase variable names
 for quad-pol (QP) acquisitions (`HHHH` → `hhhh`, `HHVV` → `hhvv`, etc.).
 
-QP is detected from token 9 of the filename: frequency A → starts with `QP` (e.g. `QPQP`);
+QP is detected from token 9 of the filename: frequency A → starts with `QP` (e.g. `QPDH`);
 frequency B → ends with `QP`.
 
 | Acquisition | Example `-vars` | `pol` per file |
@@ -373,7 +373,7 @@ per-band pol strings in extraction order:
 | DH dual-pol | `HHHH HVHV` | `hhhv` |
 | QP | `HHHH VVVV HHVV` | `hhhhvvvvhhvv` |
 
-The `mode` field matches the output mode flag: `pwr`, `dB`, `AMP`, `DN`.
+The `scaling` field reflects the output scaling: `pwr`, `dB`, `AMP`, `DN`.
 
 ### Single-band COG (default)
 
