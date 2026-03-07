@@ -327,33 +327,47 @@ def _reproject_power_band(data_2d, src_transform, src_crs, dst_transform, dst_cr
 
     Two-pass approach to avoid introducing extra NaN pixels:
 
-    Pass 1 — warp the data with invalid pixels (NaN/±inf) replaced by 0 and
-              src_nodata=None.  With no declared source nodata GDAL clamps
-              out-of-bounds kernel taps to the nearest edge pixel rather than
-              treating them as NaN, preventing the 1-2 pixel NaN erosion that
-              higher-order resampling (cubic, lanczos) otherwise adds around
-              every NaN boundary.
+    Pass 1 — warp the data with invalid pixels (NaN/±inf) replaced by their
+              nearest valid neighbour value (NN fill) and src_nodata=None.
+              Using NN-filled values instead of 0 prevents the resampling
+              kernel from mixing valid data with zeros near NaN boundaries,
+              which would otherwise produce floor-clamped artefacts (e.g.
+              -40 dB) at swath edges.  With no declared source nodata GDAL
+              clamps out-of-bounds kernel taps to the nearest edge pixel
+              rather than treating them as NaN.
 
     Pass 2 — warp a binary valid-pixel mask using nearest-neighbour resampling
               so each output pixel inherits the validity of its nearest source
-              pixel with no kernel spreading.  Only pixels with no source
-              coverage at all are set to NaN in the output.
+              pixel with no kernel spreading.  Edge-connected NaN regions are
+              correctly restored to NaN in the output regardless of the Pass 1
+              fill, because the mask is derived from the original invalid pattern.
 
     fill_holes — if True, interior NaN/±inf pixels (those fully enclosed by
                  valid data, not connected to the image frame edge) are filled
-                 with their nearest valid neighbour BEFORE warping.  This
-                 prevents the cubic kernel from seeing isolated invalid pixels
-                 inside the valid image area.  Frame-boundary nodata is
+                 with their nearest valid neighbour BEFORE warping so they
+                 remain valid in the output.  Frame-boundary nodata is
                  unaffected and still propagates to NaN in the output.
     """
+    from scipy.ndimage import distance_transform_edt
+
     src = data_2d.astype(np.float32)
 
     if fill_holes:
         src = _fill_nodata_nn(src)
 
     invalid = ~np.isfinite(src)          # NaN and ±inf
-    filled = np.where(invalid, 0.0, src)
     valid = (~invalid).astype(np.float32)
+
+    # Fill ALL invalid pixels with their nearest valid neighbour for pass 1.
+    # This gives the resampling kernel physically meaningful values instead of
+    # zeros, preventing floor-clamped artefacts at swath/image boundaries.
+    if invalid.any():
+        row_idx, col_idx = distance_transform_edt(
+            invalid, return_distances=False, return_indices=True)
+        filled = src.copy()
+        filled[invalid] = src[row_idx[invalid], col_idx[invalid]]
+    else:
+        filled = src
 
     n_threads = num_threads if num_threads is not None else os.cpu_count() or 1
 
@@ -1838,6 +1852,8 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                         print(f"        Reprojecting {var}...", flush=True)
                     band_data_2d = _reproject_power_band(band_data[0], **warp_kw)
                     band_data = band_data_2d[np.newaxis, :, :]
+                elif fill_holes:
+                    band_data[0] = _fill_nodata_nn(band_data[0])
 
                 # Get output dimensions
                 _, h_out, w_out = band_data.shape
@@ -1924,6 +1940,9 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                 for bi in range(n_bands):
                     warped[bi] = _reproject_power_band(data_stack[bi], **warp_kw)
                 data_stack = warped
+            elif fill_holes:
+                for bi in range(data_stack.shape[0]):
+                    data_stack[bi] = _fill_nodata_nn(data_stack[bi])
 
             _, h_out, w_out = data_stack.shape
 
