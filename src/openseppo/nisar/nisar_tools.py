@@ -1802,6 +1802,8 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
         # pwr/dB output is float32; AMP is uint16; DN is uint8
         _predictor = 3 if transform_mode.lower() in ("pwr", "db") else 2
         _write_extra = {"num_threads": _n_th, "predictor": _predictor}
+        if _driver == "COG":
+            _write_extra["overview_resampling"] = "average"
 
         # === LOW MEMORY MODE: Process each band individually ===
         if use_low_memory_mode:
@@ -2004,7 +2006,7 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
 
                     band_data = processed_data[i, :, :]
 
-                    profile = {"driver": _driver, "height": h_out, "width": w_out, "count": 1, "dtype": output_dtype, "crs": out_crs, "transform": out_transform, "compress": "deflate", "nodata": output_nodata, **_gtiff_extra}
+                    profile = {"driver": _driver, "height": h_out, "width": w_out, "count": 1, "dtype": output_dtype, "crs": out_crs, "transform": out_transform, "compress": "deflate", "nodata": output_nodata, **_gtiff_extra, **_write_extra}
 
                     with MemoryFile() as memfile:
                         with memfile.open(**profile) as dst:
