@@ -574,8 +574,17 @@ def processing(args):
     # 2. Logic: Rebuild Only (Immediate Exit)
     if args.rebuild_only:
         print(f"Rebuilding VRTs in {args.output}...")
-        res = nisar_tools.rebuild_vrts(output_path=args.output, variable_names=args.vars, transform_mode=args.mode, frequency=args.freq, auth_config=output_auth, verbose=args.verbose)  # Use output auth to list destination
+        # Rebuild per-date snapshot VRTs only (time-series handled by build_track_vrts below)
+        res = nisar_tools.rebuild_vrts(output_path=args.output, variable_names=args.vars, transform_mode=args.mode, frequency=args.freq, auth_config=output_auth, verbose=args.verbose, build_ts=False)
         print(res)
+        print("\nBuilding per-track time series VRTs...")
+        build_track_vrts(
+            output_path=args.output,
+            frequency=args.freq,
+            mode_str=args.mode if args.mode else "pwr",
+            verbose=args.verbose,
+            output_auth=output_auth,
+        )
         return
 
     # 3.1 Input Handling

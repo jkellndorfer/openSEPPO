@@ -2419,7 +2419,7 @@ def process_chunk_task(h5_url, variable_names, output_path, srcwin=None, projwin
 # =========================================================
 
 
-def rebuild_vrts(output_path, variable_names, transform_mode="AMP", frequency="A", auth_config=None, verbose=True):
+def rebuild_vrts(output_path, variable_names, transform_mode="AMP", frequency="A", auth_config=None, verbose=True, build_ts=True):
     """
     Scans output_path for TIFs matching frequency/mode.
     1. Rebuilds Multi-band Snapshot VRTs (grouped by Date).
@@ -2568,6 +2568,8 @@ def rebuild_vrts(output_path, variable_names, transform_mode="AMP", frequency="A
 
     # --- 4. REBUILD TIME SERIES ---
     count_ts = 0
+    if not build_ts:
+        return f"Complete. Updated {count_snapshots} Snapshots."
     if not sorted_dates:
         return "No dates found."
 
