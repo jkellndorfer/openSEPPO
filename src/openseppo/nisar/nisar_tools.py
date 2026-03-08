@@ -553,15 +553,17 @@ def generate_vrt_xml_single_step(width, height, transform, crs_wkt, band_files, 
         if fpath.startswith("s3://"):
             bucket, key = fpath.replace("s3://", "").split("/", 1)
             vrt_path = f"/vsis3/{bucket}/{key}"
+            rel_attr = "0"
         else:
-            vrt_path = fpath
+            vrt_path = os.path.basename(fpath)
+            rel_attr = "1"
         band_xml = f"""
   <VRTRasterBand dataType="{vrt_dtype}" band="{i+1}">
     <NoDataValue>{nodata_val}</NoDataValue>
     <Description>{bname}</Description>
     <Metadata><MDI key="Date">{date_str}</MDI></Metadata>
     <SimpleSource>
-      <SourceFilename relativeToVRT="0">{vrt_path}</SourceFilename>
+      <SourceFilename relativeToVRT="{rel_attr}">{vrt_path}</SourceFilename>
       <SourceBand>1</SourceBand>
       <SrcRect xOff="0" yOff="0" xSize="{width}" ySize="{height}" />
       <DstRect xOff="0" yOff="0" xSize="{width}" ySize="{height}" />
@@ -596,8 +598,10 @@ def generate_vrt_xml_timeseries(width, height, transform, crs_wkt, stack_items, 
         if fpath.startswith("s3://"):
             bucket, key = fpath.replace("s3://", "").split("/", 1)
             vrt_path = f"/vsis3/{bucket}/{key}"
+            rel_attr = "0"
         else:
-            vrt_path = fpath
+            vrt_path = os.path.basename(fpath)
+            rel_attr = "1"
 
         band_xml = f"""
   <VRTRasterBand dataType="{vrt_dtype}" band="{i + 1}">
@@ -605,7 +609,7 @@ def generate_vrt_xml_timeseries(width, height, transform, crs_wkt, stack_items, 
     <Description>{item['date']}</Description>
     <Metadata><MDI key="Date">{item['date']}</MDI></Metadata>
     <SimpleSource>
-      <SourceFilename relativeToVRT="0">{vrt_path}</SourceFilename>
+      <SourceFilename relativeToVRT="{rel_attr}">{vrt_path}</SourceFilename>
       <SourceBand>{item['band_idx']}</SourceBand>
       <SrcRect xOff="0" yOff="0" xSize="{width}" ySize="{height}" />
       <DstRect xOff="0" yOff="0" xSize="{width}" ySize="{height}" />
@@ -653,8 +657,10 @@ def generate_vrt_xml_timeseries_union(crs_wkt, stack_items, dtype="Float32", nod
         if fpath.startswith("s3://"):
             bucket, key = fpath.replace("s3://", "").split("/", 1)
             vrt_path = f"/vsis3/{bucket}/{key}"
+            rel_attr = "0"
         else:
-            vrt_path = fpath
+            vrt_path = os.path.basename(fpath)
+            rel_attr = "1"
 
         dst_x_off = int(round((item["transform"].c - union_ulx) / res_x))
         dst_y_off = int(round((union_uly - item["transform"].f) / res_y))
@@ -664,7 +670,7 @@ def generate_vrt_xml_timeseries_union(crs_wkt, stack_items, dtype="Float32", nod
     <Description>{item['date']}</Description>
     <Metadata><MDI key="Date">{item['date']}</MDI></Metadata>
     <SimpleSource>
-      <SourceFilename relativeToVRT="0">{vrt_path}</SourceFilename>
+      <SourceFilename relativeToVRT="{rel_attr}">{vrt_path}</SourceFilename>
       <SourceBand>{item['band_idx']}</SourceBand>
       <SrcRect xOff="0" yOff="0" xSize="{item['w']}" ySize="{item['h']}" />
       <DstRect xOff="{dst_x_off}" yOff="{dst_y_off}" xSize="{item['w']}" ySize="{item['h']}" />

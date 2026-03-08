@@ -248,9 +248,15 @@ def _read_tif_geo(tif_path, output_fs=None):
         return None
 
 
-def _vsis3(path):
-    """Convert s3:// URL to /vsis3/ path for use inside VRT SourceFilename."""
-    return "/vsis3/" + path[5:] if path.startswith("s3://") else path
+def _vrt_src_entry(path):
+    """Return (vrt_src_path, relativeToVRT_attr) for use in a VRT SourceFilename.
+
+    S3 paths are converted to /vsis3/ and use relativeToVRT="0".
+    Local paths use the basename and relativeToVRT="1" (VRT and source in same dir).
+    """
+    if path.startswith("s3://"):
+        return "/vsis3/" + path[5:], "0"
+    return os.path.basename(path), "1"
 
 
 def _gdal_nodata(dtype):
@@ -289,7 +295,8 @@ def _generate_mosaic_vrt_xml(frame_items, crs_wkt, dtype):
     for it in frame_items:
         dx = int(round((it["transform"].c - union_ulx) / res_x))
         dy = int(round((union_uly - it["transform"].f) / res_y))
-        lines.append(f"    <SimpleSource>\n" f'      <SourceFilename relativeToVRT="0">{_vsis3(it["path"])}</SourceFilename>\n' f"      <SourceBand>1</SourceBand>\n" f'      <SrcRect xOff="0" yOff="0" xSize="{it["w"]}" ySize="{it["h"]}" />\n' f'      <DstRect xOff="{dx}" yOff="{dy}" xSize="{it["w"]}" ySize="{it["h"]}" />\n' f"    </SimpleSource>")
+        src_path, rel_attr = _vrt_src_entry(it["path"])
+        lines.append(f"    <SimpleSource>\n" f'      <SourceFilename relativeToVRT="{rel_attr}">{src_path}</SourceFilename>\n' f"      <SourceBand>1</SourceBand>\n" f'      <SrcRect xOff="0" yOff="0" xSize="{it["w"]}" ySize="{it["h"]}" />\n' f'      <DstRect xOff="{dx}" yOff="{dy}" xSize="{it["w"]}" ySize="{it["h"]}" />\n' f"    </SimpleSource>")
     lines += ["  </VRTRasterBand>", "</VRTDataset>"]
     return "\n".join(lines), union_tf, union_w, union_h
 
@@ -324,7 +331,8 @@ def _generate_ts_union_vrt_xml(crs_wkt, stack_items, dtype):
         dx = int(round((it["transform"].c - union_ulx) / res_x))
         dy = int(round((union_uly - it["transform"].f) / res_y))
         date = it.get("date", "")
-        lines.append(f'  <VRTRasterBand dataType="{vrt_dtype}" band="{i + 1}">\n' f"    <NoDataValue>{nodata_val}</NoDataValue>\n" f"    <Description>{date}</Description>\n" f'    <Metadata><MDI key="Date">{date}</MDI></Metadata>\n' f"    <SimpleSource>\n" f'      <SourceFilename relativeToVRT="0">{_vsis3(it["path"])}</SourceFilename>\n' f'      <SourceBand>{it["band_idx"]}</SourceBand>\n' f'      <SrcRect xOff="0" yOff="0" xSize="{it["w"]}" ySize="{it["h"]}" />\n' f'      <DstRect xOff="{dx}" yOff="{dy}" xSize="{it["w"]}" ySize="{it["h"]}" />\n' f"    </SimpleSource>\n" f"  </VRTRasterBand>")
+        src_path, rel_attr = _vrt_src_entry(it["path"])
+        lines.append(f'  <VRTRasterBand dataType="{vrt_dtype}" band="{i + 1}">\n' f"    <NoDataValue>{nodata_val}</NoDataValue>\n" f"    <Description>{date}</Description>\n" f'    <Metadata><MDI key="Date">{date}</MDI></Metadata>\n' f"    <SimpleSource>\n" f'      <SourceFilename relativeToVRT="{rel_attr}">{src_path}</SourceFilename>\n' f'      <SourceBand>{it["band_idx"]}</SourceBand>\n' f'      <SrcRect xOff="0" yOff="0" xSize="{it["w"]}" ySize="{it["h"]}" />\n' f'      <DstRect xOff="{dx}" yOff="{dy}" xSize="{it["w"]}" ySize="{it["h"]}" />\n' f"    </SimpleSource>\n" f"  </VRTRasterBand>")
     lines.append("</VRTDataset>")
     return "\n".join(lines)
 
@@ -333,33 +341,36 @@ def _track_vrt_filename(metas, pol_str, mode_str):
     """
     Build a NISAR time-series VRT filename from a list of metadata dicts.
 
-    Single-value fields (one track, one direction, one frame) appear as plain values.
-    Multi-value fields are expressed as {min}-{max} for cycles/frames, and as
-    hyphen-joined lists for tracks/directions (A-direction tracks listed first).
+    Unique (track, direction, frame) combos are sorted by (track, direction, frame).
+    For ≤4 combos the track, direction, and frame tokens are each hyphen-joined in
+    combo order (preserving the pairing).  For >4 combos the tokens collapse to
+    "999", all-directions (A, D, or A-D), "999".
     """
     m0 = metas[0]
     il, pt, prod = m0["il"], m0["pt"], m0["prod"]
     obs_mode, mode, pol = m0["obs_mode"], m0["mode"], m0["polarization"]
     freq = m0["freq"]
-    accuracy = m0["accuracy"]
-    crid_prefix = m0["crid"][0] if m0.get("crid") else "P"
 
     cycles = sorted({m["cycle"] for m in metas})
-    frames = sorted({m["frame"] for m in metas})
-    # Sort direction-track pairs alphabetically by direction (A before D)
-    dir_track_pairs = sorted({(m["direction"], m["track"]) for m in metas})
-    dirs_ordered = list(dict.fromkeys(d for d, _ in dir_track_pairs))
-    tracks_ordered = list(dict.fromkeys(t for _, t in dir_track_pairs))
-
     cycle_str = f"{min(cycles):03d}-{max(cycles):03d}" if len(cycles) > 1 else f"{cycles[0]:03d}"
-    track_str = "-".join(f"{t:03d}" for t in tracks_ordered)
-    dir_str = "-".join(dirs_ordered)
-    frame_str = f"{min(frames):03d}-{max(frames):03d}" if len(frames) > 1 else f"{frames[0]:03d}"
+
+    combos = sorted({(m["track"], m["direction"], m["frame"]) for m in metas})
+    if len(combos) <= 4:
+        track_str = "-".join(f"{t:03d}" for t, d, f in combos)
+        dir_str = "-".join(d for t, d, f in combos)
+        frame_str = "-".join(f"{f:03d}" for t, d, f in combos)
+    else:
+        all_dirs = sorted({d for _, d, _ in combos})
+        track_str = "999"
+        dir_str = "-".join(all_dirs)
+        frame_str = "999"
 
     min_start = min(m["start_time"] for m in metas)
     max_end = max(m["end_time"] for m in metas)
 
-    return f"NISAR_{il}_{pt}_{prod}_{cycle_str}_{track_str}_{dir_str}_" f"{frame_str}_{mode}_{pol}_{obs_mode}_{min_start}_{max_end}_" f"{accuracy}_{crid_prefix}-EBD_{freq}_{pol_str}_{mode_str}.vrt"
+    return (f"NISAR_{il}_{pt}_{prod}_{cycle_str}_{track_str}_{dir_str}_"
+            f"{frame_str}_{mode}_{pol}_{obs_mode}_{min_start}_{max_end}"
+            f"-EBD_{freq}_{pol_str}_{mode_str}.vrt")
 
 
 def _make_ts_vrt(ts_items, crs_wkt, dtype):
@@ -379,8 +390,9 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
           build a spatial mosaic VRT per cycle, then a time-series VRT over those.
       - Single frame per track+direction:
           build a per-track time-series VRT directly from individual TIF files.
-      - Exactly one ascending group + one descending group:
-          additionally build a combined A+D time-series VRT.
+      - More than one (track, direction) group:
+          additionally build a combined multi-track time-series VRT with a
+          _track_frames.txt sidecar listing all track/direction/frame combos.
     """
     import s3fs as _s3fs
 
@@ -528,21 +540,30 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
                     print(f"    TS VRT (track {track:03d}/{direction}): {ts_name}")
                 track_dir_ts[(track, direction)] = {"ts_items": ts_items, "metas": td_metas}
 
-        # 4. Combined A+D VRT: exactly one ascending and one descending group
-        asc_keys = [(t, d) for (t, d) in track_dir_ts if d == "A"]
-        dsc_keys = [(t, d) for (t, d) in track_dir_ts if d == "D"]
-
-        if len(asc_keys) == 1 and len(dsc_keys) == 1:
-            asc_info = track_dir_ts[asc_keys[0]]
-            dsc_info = track_dir_ts[dsc_keys[0]]
-            combined_items = sorted(asc_info["ts_items"] + dsc_info["ts_items"], key=lambda x: x["date"])
-            combined_metas = asc_info["metas"] + dsc_info["metas"]
+        # 4. Combined multi-track VRT: build when more than one (track, direction) group
+        if len(track_dir_ts) > 1:
+            combined_items = sorted(
+                [item for info in track_dir_ts.values() for item in info["ts_items"]],
+                key=lambda x: x["date"],
+            )
+            combined_metas = [m for info in track_dir_ts.values() for m in info["metas"]]
             combined_xml = _make_ts_vrt(combined_items, crs_wkt, dtype)
             combined_name = _track_vrt_filename(combined_metas, pol_str, mode_str)
             combined_path = f"{out_dir}/{combined_name}"
             write_vrt(combined_path, combined_xml)
             if verbose:
-                print(f"    Combined A+D TS VRT: {combined_name}")
+                print(f"    Combined TS VRT: {combined_name}")
+
+            # Sidecar: list all (track, direction, frame) combos sorted by (track, frame, dir)
+            tf_combos = sorted(
+                {(m["track"], m["direction"], m["frame"]) for m in combined_metas},
+                key=lambda x: (x[0], x[2], x[1]),
+            )
+            sidecar_content = "\n".join(f"{t:03d}_{d}_{f:03d}" for t, d, f in tf_combos) + "\n"
+            sidecar_path = combined_path[:-4] + "_track_frames.txt"
+            write_vrt(sidecar_path, sidecar_content)
+            if verbose:
+                print(f"    Sidecar: {os.path.basename(sidecar_path)}")
 
 
 def processing(args):
