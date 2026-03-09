@@ -21,6 +21,13 @@ scale readily with the [SEPPO](https://earthbigdata.com/seppo) software by
 
 ## Quick start
 
+PIP:
+```bash
+pip install "openseppo[nisar]"
+# Also install aria2 via conda or OS installers
+```
+
+CONDA/MAMBA:
 ```bash
 conda create -n openseppo -c conda-forge "python>=3.12" openseppo aria2
 conda activate openseppo
