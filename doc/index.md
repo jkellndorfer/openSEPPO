@@ -55,6 +55,10 @@ See [Installation](installation.md) for full instructions including pip and loca
 
 - [CLI Reference](earthaccess_credentials_cli.md)
 
+**Example using openSEPPO in a Jupyter Notebook**
+
+- [openSEPPO_example.ipynb](openSEPPO_example.md)
+
 ---
 
 ## License
