@@ -65,6 +65,20 @@ except ImportError:
 
 _EARTHACCESS_TOKEN_CACHE = os.path.expanduser("~/.cache/openseppo/earthaccess_token.json")
 
+# How much oversampling to preserve for each resampling kernel when auto-computing
+# a pre-downscale factor from -tr.  A divisor of 2 means the pre-downscale stops at
+# half the target resolution, leaving a 2x "fine-tuning" step for the warp.
+# nearest/average have no kernel-spread concern so they can go all the way.
+_RESAMPLE_PREDOWNSCALE_DIVISOR = {
+    "nearest":     1,
+    "average":     1,
+    "mode":        1,
+    "bilinear":    2,
+    "cubic":       2,
+    "cubicspline": 2,
+    "lanczos":     3,
+}
+
 
 def _earthaccess_login(verbose=False):
     """
@@ -539,15 +553,17 @@ def generate_vrt_xml_single_step(width, height, transform, crs_wkt, band_files, 
         if fpath.startswith("s3://"):
             bucket, key = fpath.replace("s3://", "").split("/", 1)
             vrt_path = f"/vsis3/{bucket}/{key}"
+            rel_attr = "0"
         else:
-            vrt_path = fpath
+            vrt_path = os.path.basename(fpath)
+            rel_attr = "1"
         band_xml = f"""
   <VRTRasterBand dataType="{vrt_dtype}" band="{i+1}">
     <NoDataValue>{nodata_val}</NoDataValue>
     <Description>{bname}</Description>
     <Metadata><MDI key="Date">{date_str}</MDI></Metadata>
     <SimpleSource>
-      <SourceFilename relativeToVRT="0">{vrt_path}</SourceFilename>
+      <SourceFilename relativeToVRT="{rel_attr}">{vrt_path}</SourceFilename>
       <SourceBand>1</SourceBand>
       <SrcRect xOff="0" yOff="0" xSize="{width}" ySize="{height}" />
       <DstRect xOff="0" yOff="0" xSize="{width}" ySize="{height}" />
@@ -582,8 +598,10 @@ def generate_vrt_xml_timeseries(width, height, transform, crs_wkt, stack_items, 
         if fpath.startswith("s3://"):
             bucket, key = fpath.replace("s3://", "").split("/", 1)
             vrt_path = f"/vsis3/{bucket}/{key}"
+            rel_attr = "0"
         else:
-            vrt_path = fpath
+            vrt_path = os.path.basename(fpath)
+            rel_attr = "1"
 
         band_xml = f"""
   <VRTRasterBand dataType="{vrt_dtype}" band="{i + 1}">
@@ -591,7 +609,7 @@ def generate_vrt_xml_timeseries(width, height, transform, crs_wkt, stack_items, 
     <Description>{item['date']}</Description>
     <Metadata><MDI key="Date">{item['date']}</MDI></Metadata>
     <SimpleSource>
-      <SourceFilename relativeToVRT="0">{vrt_path}</SourceFilename>
+      <SourceFilename relativeToVRT="{rel_attr}">{vrt_path}</SourceFilename>
       <SourceBand>{item['band_idx']}</SourceBand>
       <SrcRect xOff="0" yOff="0" xSize="{width}" ySize="{height}" />
       <DstRect xOff="0" yOff="0" xSize="{width}" ySize="{height}" />
@@ -639,8 +657,10 @@ def generate_vrt_xml_timeseries_union(crs_wkt, stack_items, dtype="Float32", nod
         if fpath.startswith("s3://"):
             bucket, key = fpath.replace("s3://", "").split("/", 1)
             vrt_path = f"/vsis3/{bucket}/{key}"
+            rel_attr = "0"
         else:
-            vrt_path = fpath
+            vrt_path = os.path.basename(fpath)
+            rel_attr = "1"
 
         dst_x_off = int(round((item["transform"].c - union_ulx) / res_x))
         dst_y_off = int(round((union_uly - item["transform"].f) / res_y))
@@ -650,7 +670,7 @@ def generate_vrt_xml_timeseries_union(crs_wkt, stack_items, dtype="Float32", nod
     <Description>{item['date']}</Description>
     <Metadata><MDI key="Date">{item['date']}</MDI></Metadata>
     <SimpleSource>
-      <SourceFilename relativeToVRT="0">{vrt_path}</SourceFilename>
+      <SourceFilename relativeToVRT="{rel_attr}">{vrt_path}</SourceFilename>
       <SourceBand>{item['band_idx']}</SourceBand>
       <SrcRect xOff="0" yOff="0" xSize="{item['w']}" ySize="{item['h']}" />
       <DstRect xOff="{dst_x_off}" yOff="{dst_y_off}" xSize="{item['w']}" ySize="{item['h']}" />
@@ -1403,30 +1423,41 @@ def power_to_db_float32(data):
     return out
 
 
-def power_to_dn_uint8(data, min_db=-40.0, max_db=20.0):
+def power_to_dn_uint8(data, min_db=-31.0, max_db=7.1, min_dn=1, max_dn=255):
+    """Convert linear power to uint8 DN with a linear dB scale.
+
+    Default mapping:  dB = -31.15 + DN * 0.15
+      (equivalent to min_db=-31.0, max_db=7.1, min_dn=1, max_dn=255)
+
+    DN=0 is reserved for nodata.
+    Values below min_db clamp to min_dn; above max_db clamp to max_dn.
+    """
+    # Pre-compute scalar coefficients: raw_dn = db * scale + offset
+    scale = (max_dn - min_dn) / (max_db - min_db)
+    offset = min_dn - min_db * scale
+
     is_neg_inf = np.isneginf(data)
     is_pos_inf = np.isposinf(data)
     valid_mask = np.isfinite(data) & (data > 0)
-    db = np.full(data.shape, -9999.0, dtype=np.float32)
+
+    db = np.full(data.shape, np.nan, dtype=np.float32)
     np.log10(data, out=db, where=valid_mask)
     db[valid_mask] *= 10.0
 
-    dn = np.zeros(data.shape, dtype=np.uint8)
-    scale_factor = 254.0 / (max_db - min_db)
+    dn = np.zeros(data.shape, dtype=np.uint8)  # 0 = nodata
 
-    # Scale valid range
-    scaled = (db - min_db) * scale_factor + 1.0
-    mask_range = valid_mask & (db >= min_db) & (db <= max_db)
-    dn[mask_range] = scaled[mask_range].astype(np.uint8)
+    raw_dn = db * scale + offset
 
-    # Clamp
-    mask_low = valid_mask & (db < min_db)
-    dn[mask_low] = 1
-    dn[is_neg_inf] = 1
+    mask_range = valid_mask & (raw_dn >= min_dn) & (raw_dn <= max_dn)
+    dn[mask_range] = np.round(raw_dn[mask_range]).astype(np.uint8)
 
-    mask_high = valid_mask & (db > max_db)
-    dn[mask_high] = 255
-    dn[is_pos_inf] = 255
+    mask_low = valid_mask & (raw_dn < min_dn)
+    dn[mask_low] = min_dn
+    dn[is_neg_inf] = min_dn
+
+    mask_high = valid_mask & (raw_dn > max_dn)
+    dn[mask_high] = max_dn
+    dn[is_pos_inf] = max_dn
 
     return dn
 
@@ -1543,18 +1574,94 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
 
         # --- REPROJECTION SETUP ---
         input_crs_obj = _parse_crs(info["crs"])
-        dst_crs_obj = _parse_crs(target_srs) if target_srs else None
-        needs_reproject = (dst_crs_obj is not None and dst_crs_obj != input_crs_obj)
+        dst_crs_obj = _parse_crs(target_srs) if target_srs else input_crs_obj
+        crs_changes = (dst_crs_obj != input_crs_obj)
+
+        # --- AUTO PRE-DOWNSCALE from -tr (only when -d not explicitly set) ---
+        # For same-CRS exact integer multiples: pure block averaging, no warp.
+        # For same-CRS fractional multiples or reprojection: pick the largest
+        # integer pre-downscale that still leaves enough oversampling for the
+        # chosen resample kernel, then do a small warp step for the remainder.
+        if target_res is not None and downscale_factor is None:
+            _tr_x = abs(target_res[0])
+            _tr_y = abs(target_res[1])
+            _nat_x = abs(info["res_x"])
+            _nat_y = abs(info["res_y"])
+            _divisor = _RESAMPLE_PREDOWNSCALE_DIVISOR.get((resample or "cubic").lower(), 2)
+
+            if not crs_changes:
+                _ratio_x = _tr_x / _nat_x
+                _ratio_y = _tr_y / _nat_y
+                _ix = int(round(_ratio_x))
+                _iy = int(round(_ratio_y))
+                if (_ix == _iy and _ix > 1
+                        and math.isclose(_ratio_x, _ix, rel_tol=1e-4)
+                        and math.isclose(_ratio_y, _iy, rel_tol=1e-4)):
+                    # Exact integer multiple: pure block average, no warp needed
+                    downscale_factor = _ix
+                    if verbose:
+                        print(f"    Auto pre-downscale: {_ix}x block average "
+                              f"({_nat_x:.4g} -> {_tr_x:.4g}, no warp needed)", flush=True)
+                else:
+                    _ratio = min(_ratio_x, _ratio_y)
+                    _auto_d = max(1, int(math.floor(_ratio / _divisor)))
+                    if _auto_d > 1:
+                        downscale_factor = _auto_d
+                        if verbose:
+                            print(f"    Auto pre-downscale: {_auto_d}x before resampling "
+                                  f"({_nat_x:.4g} -> {_nat_x * _auto_d:.4g}, "
+                                  f"then warp to {_tr_x:.4g})", flush=True)
+            else:
+                # Reprojection case: estimate natural output pixel size via a
+                # preliminary calculate_default_transform on the full raster extent.
+                try:
+                    _nx, _ny = len(info["x"]), len(info["y"])
+                    _ulx = info["x"][0] - _nat_x / 2
+                    _uly = info["y"][0] + _nat_y / 2
+                    _pdt, _, _ = calculate_default_transform(
+                        input_crs_obj, dst_crs_obj, _nx, _ny,
+                        left=_ulx, bottom=_uly - _ny * _nat_y,
+                        right=_ulx + _nx * _nat_x, top=_uly,
+                    )
+                    _ratio_x = _tr_x / abs(_pdt.a)
+                    _ratio_y = _tr_y / abs(_pdt.e)
+                    _ratio = min(_ratio_x, _ratio_y)
+                    _auto_d = max(1, int(math.floor(_ratio / _divisor)))
+                    if _auto_d > 1:
+                        downscale_factor = _auto_d
+                        if verbose:
+                            print(f"    Auto pre-downscale: {_auto_d}x before reprojection "
+                                  f"({_nat_x:.4g} -> {_nat_x * _auto_d:.4g} native, "
+                                  f"target {_tr_x:.4g})", flush=True)
+                except Exception:
+                    pass  # fall back to no pre-downscale
+
+        # Determine whether a warp is needed due to an explicit target resolution.
+        # Skip if the effective resolution (after downscaling) already matches -tr.
+        needs_resample = False
+        if target_res is not None and not crs_changes:
+            df = downscale_factor if (downscale_factor and downscale_factor > 1) else 1
+            eff_res_x = abs(info["res_x"]) * df
+            eff_res_y = abs(info["res_y"]) * df
+            already_matches = (
+                math.isclose(eff_res_x, abs(target_res[0]), rel_tol=1e-6) and
+                math.isclose(eff_res_y, abs(target_res[1]), rel_tol=1e-6)
+            )
+            needs_resample = not already_matches
+
+        needs_reproject = crs_changes or needs_resample
         resample_enum = _get_resampling(resample)
-        if needs_reproject and verbose:
+        if crs_changes and needs_reproject and verbose:
             src_epsg = input_crs_obj.to_epsg()
             src_label = f"EPSG:{src_epsg}" if src_epsg else info["crs"][:40]
             print(f"    Reprojecting: {src_label} -> {target_srs} (resample={resample})", flush=True)
 
         # When reprojecting with a projwin, the projwin coords are in target_srs.
         # Expand to native-CRS subset using calculate_source_window.
+        # Only needed when the CRS actually changes; for same-CRS resampling the
+        # projwin is already in native units.
         native_projwin = projwin
-        if needs_reproject and projwin:
+        if crs_changes and projwin:
             ulx_t, uly_t, lrx_t, lry_t = projwin
             n_left, n_bottom, n_right, n_top = calculate_source_window(
                 target_bounds=(ulx_t, lry_t, lrx_t, uly_t),
@@ -1707,9 +1814,13 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
         if downscale_factor and downscale_factor > 1:
             out_res_x = orig_res_x * downscale_factor
             out_res_y = orig_res_y * downscale_factor
+            if verbose:
+                print(f"    Effective resolution after downscale: {abs(out_res_x):.2f} x {abs(out_res_y):.2f}", flush=True)
         else:
             out_res_x = orig_res_x
             out_res_y = orig_res_y
+        if needs_resample and verbose:
+            print(f"    Resampling: {abs(out_res_x):.6g} x {abs(out_res_y):.6g} -> {abs(target_res[0]):.6g} x {abs(target_res[1]):.6g} (resample={resample})", flush=True)
 
         transform = from_origin(ulx, uly, out_res_x, abs(out_res_y))
         crs = info["crs"]
@@ -1830,6 +1941,8 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
 
                 # Downscale
                 if downscale_factor and downscale_factor > 1:
+                    if verbose:
+                        print(f"        Downscaling by {downscale_factor} -> {abs(out_res_x):.2f} x {abs(out_res_y):.2f}", flush=True)
                     band_data = perform_downscaling(band_data, downscale_factor)
 
                 # Reproject (on raw power data, before dtype conversion)
@@ -1914,7 +2027,7 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
         else:
             if downscale_factor and downscale_factor > 1:
                 if verbose:
-                    print(f"    Downscaling by {downscale_factor}...", flush=True)
+                    print(f"    Downscaling by {downscale_factor} -> {abs(out_res_x):.2f} x {abs(out_res_y):.2f}", flush=True)
                 data_stack = perform_downscaling(data_stack, downscale_factor)
 
             # Reproject (on raw power data, before dtype conversion)
@@ -2317,7 +2430,7 @@ def process_chunk_task(h5_url, variable_names, output_path, srcwin=None, projwin
 # =========================================================
 
 
-def rebuild_vrts(output_path, variable_names, transform_mode="AMP", frequency="A", auth_config=None, verbose=True):
+def rebuild_vrts(output_path, variable_names, transform_mode="AMP", frequency="A", auth_config=None, verbose=True, build_ts=True):
     """
     Scans output_path for TIFs matching frequency/mode.
     1. Rebuilds Multi-band Snapshot VRTs (grouped by Date).
@@ -2466,6 +2579,8 @@ def rebuild_vrts(output_path, variable_names, transform_mode="AMP", frequency="A
 
     # --- 4. REBUILD TIME SERIES ---
     count_ts = 0
+    if not build_ts:
+        return f"Complete. Updated {count_snapshots} Snapshots."
     if not sorted_dates:
         return "No dates found."
 

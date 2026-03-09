@@ -133,6 +133,26 @@ seppo_nisar_gcov_convert -i file.h5 -o out/ -t_srs 4326 --warp_threads 4
 
 `--fill_holes` also works without `-t_srs` (fills holes in the native UTM grid).
 
+### `-tr` and automatic pre-downscaling
+
+When `-tr` is given without an explicit `-d`, the tool automatically chooses a
+pre-downscale factor before the warp step to improve quality and speed:
+
+| Scenario | Auto pre-downscale | Warp step |
+|---|---|---|
+| `-tr 100 100` on 20 m native, same CRS | `5×` block average (exact multiple) | none |
+| `-tr 90 90` on 20 m native, same CRS, `--resample cubic` | `2×` block average (`floor(4.5 / 2) = 2`) | 40 m → 90 m |
+| `-tr 0.001 0.001` on 20 m UTM → 4326 (native ≈ 0.00018°), `--resample cubic` | `2×` block average (`floor(5.6 / 2) = 2`) | 40 m-equiv → 0.001° |
+| `-d 4 -tr 90 90` on 20 m (explicit `-d`) | none (user `-d` respected) | 80 m → 90 m |
+| `-tr 25 25` on 20 m, same CRS, `--resample cubic` | none (ratio 1.25 < divisor 2) | 20 m → 25 m directly |
+
+The divisor that limits how aggressively the pre-downscale step runs depends on the
+resampling kernel: `nearest` / `average` use divisor 1 (full pre-downscale);
+`bilinear` / `cubic` / `cubicspline` use 2; `lanczos` uses 3.
+This ensures the warp kernel always has enough oversampling to avoid aliasing.
+
+`-tr` also works **without** `-t_srs` to resample within the native CRS.
+
 ---
 
 ## Downscaling
