@@ -13,6 +13,10 @@ nav:
       - CLI Reference: nisar_gcov_convert_cli.md
       - Examples: nisar_gcov_convert_examples.md
       - Dual-pol ratio: ratio.md
+  - seppo_nisar_search:
+      - CLI Reference: nisar_search_cli.md
+  - seppo_earthaccess_credentials:
+      - CLI Reference: earthaccess_credentials_cli.md
 
 theme:
   name: material
