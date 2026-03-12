@@ -116,3 +116,10 @@ seppo_nisar_gcov_convert -i la_urls.txt -o out/ \
 ---
 
 See [Examples](nisar_gcov_convert_examples.md) for the full reference, or [CLI Reference](nisar_gcov_convert_cli.md) for all options.
+
+---
+
+## Using openSEPPO in Python / Jupyter
+
+For integrating openSEPPO into a Python script or notebook — including programmatic search, conversion, and loading results with `xarray` — see the
+[Jupyter Notebook example](openSEPPO_example.md).
