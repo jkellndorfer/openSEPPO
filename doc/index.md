@@ -19,26 +19,31 @@ work standalone** (on-premise, your laptop, cloud instances, ...),  and to integ
 
 ---
 
-## Quick start
+## Quick start — TL;DR
 
-PIP:
 ```bash
-pip install "openseppo[nisar]"
-# Also install aria2 via conda or OS installers
+# 1. Install
+mamba create -n openseppo -c conda-forge openseppo aria2 && conda activate openseppo
+
+# 2. Cache Earthdata credentials
+seppo_earthaccess_credentials -t
+
+# 3. Find NISAR scenes over your area of interest
+seppo_nisar_search --point -118.24 34.05 --buffer 1.0 -o urls.txt
+
+# 4. Convert to dB Cloud Optimized GeoTIFFs + time-series VRT stack
+seppo_nisar_gcov_convert -i urls.txt -o out/ -dB -v
 ```
 
-CONDA/MAMBA:
-```bash
-mamba env create -n openseppo -c conda-forge openseppo aria2
-conda activate openseppo
-```
+**→ [Full Quick Start guide with variants and output description](quickstart.md)**
 
-See [Installation](installation.md) for full instructions including pip and local clone options.
+See [Installation](installation.md) for pip, local clone, and credential setup options.
 
 ---
 
 ## Documentation
 
+- [Quick Start](quickstart.md)
 - [Installation](installation.md)
 
 **seppo_nisar_gcov_convert**

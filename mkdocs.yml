@@ -8,6 +8,7 @@ docs_dir: doc
 
 nav:
   - Home: index.md
+  - Quick Start: quickstart.md
   - Installation: installation.md
   - seppo_nisar_gcov_convert:
       - CLI Reference: nisar_gcov_convert_cli.md
