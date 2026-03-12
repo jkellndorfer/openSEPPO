@@ -7,7 +7,7 @@ package:
 
 source:
   url: https://github.com/EarthBigData/openSEPPO/archive/refs/tags/v{{ version }}.tar.gz
-  sha256: PLACEHOLDER_UPDATE_AFTER_RELEASE
+  sha256: 38098021dba203a58e64fece6b55c6ce2d689de9601366d223727cbedb7255db
 
 build:
   number: 0
