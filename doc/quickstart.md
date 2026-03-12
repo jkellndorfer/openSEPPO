@@ -57,7 +57,7 @@ seppo_nisar_gcov_convert -i urls.txt -lg
 ## 5 — Convert to GeoTIFF
 
 Convert to amplitude-scaled Cloud Optimized GeoTIFFs at 50 m resolution,
-clipped to the scene extent, with a time-series VRT stack:
+clipped to a subset provided in projection coordinates crossing the two frames, with a time-series VRT stack:
 
 ```bash
 seppo_nisar_gcov_convert \
