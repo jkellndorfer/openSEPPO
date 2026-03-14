@@ -4,11 +4,12 @@ build-backend = "hatchling.build"
 
 [project]
 name = "openseppo"
-version = "0.1.4"
-description = "Open SEPPO Tools — geospatial and SAR processing utilities"
+version = "0.2.0"
+description = "Open SEPPO Tools -- geospatial and SAR processing utilities"
 readme = "README.md"
-license = { file = "LICENSE" }
-requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
 authors = [
     { name = "Earth Big Data LLC", email = "info@earthbigdata.com" },
 ]

@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """
-seppo_nisar_search — NISAR Earthdata catalog search
+seppo_nisar_search -- NISAR Earthdata catalog search
 ****************************************************
-openSEPPO — Open SEPPO Tools
+openSEPPO -- Open SEPPO Tools
 Supporting Geospatial and Remote Sensing Data Processing
 
 (c) 2026 Earth Big Data LLC  |  https://earthbigdata.com
@@ -23,8 +23,8 @@ For --format url (default):
 For all other formats (csv, json, geojson, kml):
   Both url (s3://) and url_https columns are included in every record.
 
-All column-based filters (track, frame, product, direction, cycle, …) and
-spatial filters (--bbox, --ullr, --wkt, --point, --geojson, …) that are
+All column-based filters (track, frame, product, direction, cycle, ...) and
+spatial filters (--bbox, --ullr, --wkt, --point, --geojson, ...) that are
 natively supported by CMR are sent directly; remaining filters are applied in
 Python after the CMR call.
 
@@ -62,7 +62,7 @@ except ImportError:
     HAS_EARTHACCESS = False
 
 
-# ── Constants ─────────────────────────────────────────────────────────────────
+# -- Constants -----------------------------------------------------------------
 
 ALL_COLUMNS = [
     "bucket",
@@ -107,7 +107,7 @@ GROUP_REQUIRED = [
     "url_https",
 ]
 
-# CMR collection short_name mapping: (inst_level, product) → [short_name, ...]
+# CMR collection short_name mapping: (inst_level, product) -> [short_name, ...]
 # Lists include BETA versions (current) followed by anticipated operational names.
 # Use --short_name to override.
 _NISAR_SHORT_NAMES = {
@@ -132,7 +132,7 @@ _NISAR_SHORT_NAMES = {
 }
 
 
-# ─── Geometry helpers ──────────────────────────────────────────────────────────
+# --- Geometry helpers ----------------------------------------------------------
 
 
 def ullr_to_wkt(ul_lon, ul_lat, lr_lon, lr_lat):
@@ -146,7 +146,7 @@ def bbox_to_wkt(min_lon, min_lat, max_lon, max_lat):
 
 
 def _geom_obj_to_wkt(geom):
-    """GeoJSON geometry dict → 2-D WKT string."""
+    """GeoJSON geometry dict -> 2-D WKT string."""
     gtype = geom.get("type", "")
     coords = geom.get("coordinates")
 
@@ -205,19 +205,19 @@ def _wkt_polygon_to_tuples(wkt):
     return None
 
 
-# ─── NISAR granule name parser ─────────────────────────────────────────────────
+# --- NISAR granule name parser -------------------------------------------------
 
 
 def _parse_nisar_granule_name(gname):
     """Parse a NISAR granule name into component fields.
 
-    Single-acquisition products (RSLC, GSLC, GCOV, SME2) – 18 tokens:
+    Single-acquisition products (RSLC, GSLC, GCOV, SME2) - 18 tokens:
       NISAR_{IL}_{PT}_{PROD}_{CYL}_{REL}_{P}_{FRM}_{MODE}_{POLE}_{S}_{Start}_{End}_{CRID}_{A}_{C}_{LOC}_{CTR}
        [0]  [1]  [2]   [3]  [4]   [5]  [6] [7]   [8]   [9]  [10]  [11]       [12]   [13] [14][15] [16]  [17]
       Example:
         NISAR_L2_PR_GCOV_015_172_D_065_4005_DHDH_A_20260121T031851_20260121T031926_P05006_N_F_J_001
 
-    Pair-acquisition products (RIFG, RUNW, GUNW, ROFF, GOFF) – 20 tokens:
+    Pair-acquisition products (RIFG, RUNW, GUNW, ROFF, GOFF) - 20 tokens:
       NISAR_{IL}_{PT}_{PROD}_{CYL}_{REL}_{P}_{FRM}_{SCY}_{MODE}_{PO}_{RefStart}_{RefEnd}_{SecStart}_{SecEnd}_{CRID}_{A}_{C}_{LOC}_{CTR}
        [0]  [1]  [2]   [3]  [4]   [5]  [6] [7]   [8]   [9]  [10]  [11]          [12]       [13]         [14]    [15] [16][17] [18]  [19]
       SCY (secondary cycle) is at [8] between FRM [7] and MODE [9].
@@ -235,7 +235,7 @@ def _parse_nisar_granule_name(gname):
     try:
         product = parts[3]
         if product in _PAIR_PRODUCTS:
-            # Pair product – 20 tokens; SCY at [8], four timestamps at [11-14]
+            # Pair product - 20 tokens; SCY at [8], four timestamps at [11-14]
             if len(parts) < 20:
                 return {}
             return {
@@ -261,7 +261,7 @@ def _parse_nisar_granule_name(gname):
                 "counter": parts[19],
             }
         else:
-            # Single-acquisition product – 18 tokens; MODE at [8], no SCY
+            # Single-acquisition product - 18 tokens; MODE at [8], no SCY
             return {
                 "mission": parts[0],
                 "inst_level": parts[1],
@@ -299,9 +299,9 @@ def _parse_dt(val):
     return None
 
 
-# ─── CMR direct query helpers ──────────────────────────────────────────────────
+# --- CMR direct query helpers --------------------------------------------------
 
-# CMR granule search is a public API — no authentication required.
+# CMR granule search is a public API -- no authentication required.
 CMR_GRANULE_URL = "https://cmr.earthdata.nasa.gov/search/granules.json"
 
 
@@ -384,7 +384,7 @@ def _cmr_entry_to_records(entry):
     return records
 
 
-# ─── CMR search helpers ────────────────────────────────────────────────────────
+# --- CMR search helpers --------------------------------------------------------
 
 
 def _build_short_names(args):
@@ -400,12 +400,17 @@ def _build_short_names(args):
     return list(OrderedDict.fromkeys(names))  # deduplicate, preserve order
 
 
-def _build_granule_name_pattern(args):
-    """Build a CMR granule_name wildcard pattern from available filter arguments.
+def _build_granule_name_patterns(args):
+    """Build CMR granule_name wildcard patterns from available filter arguments.
 
-    Tokens are assembled in name-field order and joined with '*' wildcards so the
-    pattern can match any granule whose name contains those tokens in sequence.
-    The pattern always starts and ends with '*'.
+    When a filter field has multiple values (e.g. ``--frame 17 18``), the
+    cartesian product of all multi-value fields is expanded so that each
+    combination gets its own specific CMR pattern.  This pushes the filtering
+    to the server side and avoids fetching unrelated granules.
+
+    Tokens are assembled in name-field order and joined with '*' wildcards so
+    each pattern can match any granule whose name contains those tokens in
+    sequence.  Every pattern starts and ends with '*'.
 
     Single-acquisition token order:  product, cycle, track, direction, frame, mode, polarization
     Pair-acquisition token order:    product, cycle, track, direction, frame, cycle2, mode, polarization
@@ -413,66 +418,50 @@ def _build_granule_name_pattern(args):
 
     Examples:
       --product GCOV --track 64 --frame 1 --mode 2005 --polarization DHDH
-        → 'NISAR*_GCOV*_064*_001*_2005*_DHDH*'
-      --product GUNW --track 71 --direction A --frame 173 --cycle 3 --cycle2 5 --polarization SH
-        → 'NISAR*_GUNW*_003*_071*_A*_173*_005*_SH*'
+        -> ['NISAR*_GCOV*_064*_001*_2005*_DHDH*']
+      --track 105 --frame 17 18
+        -> ['NISAR*_*_*_105_*_*_017_*_*_*', 'NISAR*_*_*_105_*_*_018_*_*_*']
 
-    Returns None when no filtering token is available.
+    Returns an empty list when no filtering token is available.
     """
+    from itertools import product as _product
+
     is_pair = bool(args.product and len(args.product) == 1 and args.product[0] in _PAIR_PRODUCTS)
-    has_cycle2 = bool(getattr(args, "cycle2", None) and len(args.cycle2) == 1)
 
-    def _tok(lst, fmt=None):
-        if lst and len(lst) == 1:
-            v = lst[0]
-            return fmt.format(v) if fmt else str(v)
-        return None
+    def _vals(lst, fmt=None):
+        """Return list of formatted token values, or ['*'] if empty/None."""
+        if not lst:
+            return ["*"]
+        return [fmt.format(v) if fmt else str(v) for v in lst]
 
-    tokens = []
-    t = _tok(args.product)
-    if t:
-        tokens.append(t)
-    else:
-        tokens.append("*")
-    t = _tok(args.cycle, "{:03d}")
-    if t:
-        tokens.append(t)
-    else:
-        tokens.append("*")
-    t = _tok(args.track, "{:03d}")
-    if t:
-        tokens.append(t)
-    else:
-        tokens.append("*")
-    t = _tok(args.direction)
-    if t:
-        tokens.append(t)
-    else:
-        tokens.append("*")
-    t = _tok(args.frame, "{:03d}")
-    if t:
-        tokens.append(t)
-    else:
-        tokens.append("*")
-    if is_pair and has_cycle2:
-        tokens.append(f"{args.cycle2[0]:03d}")
-    t = _tok(args.mode)
-    if t:
-        tokens.append(t)
-    else:
-        tokens.append("*")
-    t = _tok(args.polarization)
-    if t:
-        tokens.append(t)
-    else:
-        tokens.append("*")
-    # tokens[0] is product; short_name already covers collection/product filtering.
-    # Only send granule_name to CMR when at least one other field (cycle, track,
-    # direction, frame, mode, polarization) has a specific value — otherwise the
-    # all-wildcard pattern forces expensive server-side regex on every granule name.
-    if not any(t and t != "*" for t in tokens[1:]):
-        return None
-    return "NISAR*" + "".join(f"_{tok}" for tok in tokens) + "*"
+    # Each element is a list of possible values for that token position.
+    token_slots = [
+        _vals(args.product),
+        _vals(args.cycle, "{:03d}"),
+        _vals(args.track, "{:03d}"),
+        _vals(args.direction),
+        _vals(args.frame, "{:03d}"),
+    ]
+    if is_pair:
+        cycle2 = getattr(args, "cycle2", None)
+        token_slots.append(_vals(cycle2, "{:03d}"))
+    token_slots.extend([
+        _vals(args.mode),
+        _vals(args.polarization),
+    ])
+
+    patterns = []
+    for combo in _product(*token_slots):
+        tokens = list(combo)
+        # tokens[0] is product; short_name already covers collection/product
+        # filtering.  Only send granule_name to CMR when at least one other
+        # field has a specific value -- otherwise the all-wildcard pattern
+        # forces expensive server-side regex on every granule name.
+        if not any(t != "*" for t in tokens[1:]):
+            continue
+        pat = "NISAR*" + "".join(f"_{tok}" for tok in tokens) + "*"
+        patterns.append(pat)
+    return patterns
 
 
 def _build_cmr_spatial(args):
@@ -480,7 +469,7 @@ def _build_cmr_spatial(args):
     if args.point:
         lon, lat = args.point
         if args.buffer:
-            # buffer in degrees; 1° ≈ 111 320 m
+            # buffer in degrees; 1 deg ≈ 111 320 m
             return {"circle": (lon, lat, args.buffer * 111320)}
         return {"point": (lon, lat)}
     if args.bbox:
@@ -518,7 +507,7 @@ def _build_cmr_spatial(args):
 def search_earthaccess(args):
     """Search NISAR products via direct CMR HTTP query.
 
-    CMR granule search is a public API — no Earthdata authentication required.
+    CMR granule search is a public API -- no Earthdata authentication required.
     Uses the requests library (a transitive dependency of earthaccess).
     Returns a list of record dicts.
     """
@@ -528,18 +517,15 @@ def search_earthaccess(args):
         print("Error: 'requests' is not installed. Install with: pip install requests", file=sys.stderr)
         sys.exit(1)
 
-    # ── Build short_names list ─────────────────────────────────────────────────
+    # -- Build short_names list -------------------------------------------------
     short_names = list(args.short_name) if args.short_name else _build_short_names(args)
     if not short_names:
         short_names = [None]  # fall back to provider-level search
 
-    # ── Build base CMR params ──────────────────────────────────────────────────
+    # -- Build base CMR params --------------------------------------------------
     base_params = {}
 
-    pattern = _build_granule_name_pattern(args)
-    if pattern:
-        base_params["producer_granule_id"] = pattern
-        base_params["options[producer_granule_id][pattern]"] = "true"
+    patterns = _build_granule_name_patterns(args)
 
     if args.start_time_after and args.start_time_before:
         base_params["temporal"] = f"{args.start_time_after},{args.start_time_before}"
@@ -565,45 +551,71 @@ def search_earthaccess(args):
 
     count = args.limit if (args.limit and args.limit > 0) else -1
 
+    # When no patterns were generated, use a single query without granule_name
+    if not patterns:
+        patterns = [None]
+
     if args.verbose or args.dryrun:
         print("--- CMR direct query ---", file=sys.stderr)
         print(f"  short_names: {short_names}", file=sys.stderr)
         print(f"  params: {base_params}", file=sys.stderr)
+        print(f"  patterns: {patterns}", file=sys.stderr)
         print(f"  count:  {count}", file=sys.stderr)
         print(file=sys.stderr)
 
     if args.dryrun:
         return []
 
-    # ── Query CMR, try each short_name in order, stop on first results ─────────
+    # -- Query CMR: for each (short_name, pattern) combo, paginate and collect --
+    # Deduplicate across patterns by producer_granule_id to avoid returning the
+    # same granule twice when patterns overlap.
+    seen_ids = set()
     entries = []
+
     for sn in short_names:
-        params = dict(base_params)
-        if sn:
-            params["short_name"] = sn
-        params["page_size"] = min(2000, count) if count > 0 else 2000
+        sn_found = False
+        for pat in patterns:
+            params = dict(base_params)
+            if sn:
+                params["short_name"] = sn
+            if pat:
+                params["producer_granule_id"] = pat
+                params["options[producer_granule_id][pattern]"] = "true"
+            params["page_size"] = min(2000, count) if count > 0 else 2000
 
-        sn_entries = []
-        page_num = 1
-        while True:
-            params["page_num"] = page_num
-            resp = _requests.get(CMR_GRANULE_URL, params=params, timeout=60)
-            resp.raise_for_status()
-            page_entries = resp.json()["feed"]["entry"]
-            sn_entries.extend(page_entries)
-            cmr_hits = int(resp.headers.get("CMR-Hits", 0))
-            if args.verbose:
-                print(f"  short_name={sn!r} page {page_num}: {len(page_entries)} entries (CMR-Hits={cmr_hits})", file=sys.stderr)
-            if count > 0 and len(sn_entries) >= count:
-                sn_entries = sn_entries[:count]
-                break
-            if len(sn_entries) >= cmr_hits:
-                break
-            page_num += 1
+            page_num = 1
+            while True:
+                params["page_num"] = page_num
+                resp = _requests.get(CMR_GRANULE_URL, params=params, timeout=60)
+                resp.raise_for_status()
+                page_entries = resp.json()["feed"]["entry"]
+                cmr_hits = int(resp.headers.get("CMR-Hits", 0))
+                if args.verbose:
+                    _pat_label = f" pattern={pat!r}" if pat else ""
+                    print(f"  short_name={sn!r}{_pat_label} page {page_num}: {len(page_entries)} entries (CMR-Hits={cmr_hits})", file=sys.stderr)
 
-        if sn_entries:
-            entries = sn_entries
+                for e in page_entries:
+                    gid = e.get("producer_granule_id") or e.get("title", "")
+                    if gid not in seen_ids:
+                        seen_ids.add(gid)
+                        entries.append(e)
+                        sn_found = True
+
+                fetched_this_pat = page_num * params["page_size"]
+                if count > 0 and len(entries) >= count:
+                    break
+                if fetched_this_pat >= cmr_hits:
+                    break
+                page_num += 1
+
+            if count > 0 and len(entries) >= count:
+                break
+
+        if sn_found:
             break  # BETA collection found results; skip operational fallback
+
+    if count > 0:
+        entries = entries[:count]
 
     if args.verbose:
         print(f"CMR returned {len(entries)} granule(s).", file=sys.stderr)
@@ -614,7 +626,7 @@ def search_earthaccess(args):
     return records
 
 
-# ─── Column post-filtering ─────────────────────────────────────────────────────
+# --- Column post-filtering -----------------------------------------------------
 
 
 def _text_matches(val, filter_vals):
@@ -668,7 +680,7 @@ def _apply_column_filters(records, args):
     return result
 
 
-# ─── Latest-CRID filter ────────────────────────────────────────────────────────
+# --- Latest-CRID filter --------------------------------------------------------
 
 
 def _apply_latest_crid(records):
@@ -690,7 +702,7 @@ def _apply_latest_crid(records):
     return result
 
 
-# ─── Sorting for grouped output ────────────────────────────────────────────────
+# --- Sorting for grouped output ------------------------------------------------
 
 
 def _sort_for_group(records):
@@ -706,7 +718,7 @@ def _sort_for_group(records):
     return sorted(records, key=key)
 
 
-# ─── Output formatters ─────────────────────────────────────────────────────────
+# --- Output formatters ---------------------------------------------------------
 
 
 def _rec_props(rec):
@@ -806,7 +818,7 @@ def format_output(records, fmt, columns=None, https=False):
     return []
 
 
-# ─── Grouped output ────────────────────────────────────────────────────────────
+# --- Grouped output ------------------------------------------------------------
 
 
 def _group_records(records):
@@ -881,7 +893,7 @@ def output_grouped(records, args):
                 sys.stdout.write("\n")
 
 
-# ─── Main processing ───────────────────────────────────────────────────────────
+# --- Main processing -----------------------------------------------------------
 
 
 def processing(args):
@@ -919,7 +931,7 @@ def processing(args):
         sys.stdout.write(output)
 
 
-# ─── Argument parsing ──────────────────────────────────────────────────────────
+# --- Argument parsing ----------------------------------------------------------
 
 
 def myargsparse(a):
@@ -975,7 +987,7 @@ def myargsparse(a):
 \r  WKT polygon:
 \r    {thisprog} --wkt "POLYGON((-120 40,-100 40,-100 50,-120 50,-120 40))"
 
-\r  GeoJSON file – union all features:
+\r  GeoJSON file - union all features:
 \r    {thisprog} --geojson aoi.geojson --union_geojson --product GCOV --group
 
 \r  Pair-acquisition product (GUNW) with secondary cycle:
@@ -985,18 +997,18 @@ def myargsparse(a):
 \r    {thisprog} --product GCOV --track 64 --dryrun
 """
 
-    description = "SEPPO – Search NISAR product URLs via NASA Earthdata CMR (earthaccess).\n" "Credentials are read from  the netrc; an interactive prompt is shown if\n" "no entry is found.  Use --dryrun to inspect the CMR query without logging in.\n" "For --format url: s3:// by default, --https for https:// URLs.\n" "For all other formats: both url (s3) and url_https columns are included."
+    description = "SEPPO - Search NISAR product URLs via NASA Earthdata CMR (earthaccess).\n" "Credentials are read from  the netrc; an interactive prompt is shown if\n" "no entry is found.  Use --dryrun to inspect the CMR query without logging in.\n" "For --format url: s3:// by default, --https for https:// URLs.\n" "For all other formats: both url (s3) and url_https columns are included."
 
     p = argparse.ArgumentParser(prog=thisprog, description=description, epilog=epilog, formatter_class=CustomFormatter)
 
-    # ── Column / metadata filters ─────────────────────────────────────────────
+    # -- Column / metadata filters ---------------------------------------------
     cf = p.add_argument_group("Column / metadata filters (all accept one or more values)")
     cf.add_argument("--bucket", nargs="*", metavar="TEXT", help="S3 bucket name(s). Supports LIKE wildcards (%%).")
     cf.add_argument("--mission", nargs="*", metavar="CODE", help="Mission code(s) (e.g. NISAR)")
     cf.add_argument("--inst_level", nargs="*", metavar="CODE", help="Instrument (L-band) and Processing level(s) (e.g. L1 L2)")
     cf.add_argument("--proctype", nargs="*", metavar="CODE", help="Processing type(s)")
     cf.add_argument("--product", nargs="+", required=False, default=["GCOV"], metavar="CODE", help="Product type(s) (e.g. GCOV RSLC GSLC SME2 RIFG RUNW GUNW ROFF GOFF)", choices=sorted(_SINGLE_PRODUCTS.union(_PAIR_PRODUCTS)))
-    cf.add_argument("--short_name", nargs="*", metavar="NAME", help="CMR short name(s) – overrides auto-construction from " "--inst_level + --product.  E.g. NISAR_L2_GCOV")
+    cf.add_argument("--short_name", nargs="*", metavar="NAME", help="CMR short name(s) - overrides auto-construction from " "--inst_level + --product.  E.g. NISAR_L2_GCOV")
     cf.add_argument("--cycle", nargs="*", type=int, metavar="INT", help="Reference cycle number(s)")
     cf.add_argument("--cycle2", nargs="*", type=int, metavar="INT", help="Secondary cycle number(s) for pair-acquisition products " "(RIFG, RUNW, GUNW, ROFF, GOFF).  In the granule name SCY sits between FRM and MODE.")
     cf.add_argument("--track", nargs="*", type=int, metavar="INT", help="Track / relative-orbit number(s)")
@@ -1012,23 +1024,23 @@ def myargsparse(a):
     cf.add_argument("--counter", nargs="*", metavar="CODE", help="Counter value(s)")
     cf.add_argument("--url_pattern", metavar="PATTERN", help="LIKE pattern matched against url (e.g. '%%GCOV%%')")
 
-    # ── Time filters ──────────────────────────────────────────────────────────
+    # -- Time filters ----------------------------------------------------------
     tf = p.add_argument_group("Time filters", "ISO 8601: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS.  " "Maps to CMR temporal parameter. Only for single-acquisition products " "(RSLC, GSLC, GCOV, SME2)")
     tf.add_argument("--start_time_after", metavar="DATETIME", help="Acquisition start >= DATETIME")
     tf.add_argument("--start_time_before", metavar="DATETIME", help="Acquisition start <= DATETIME")
 
-    # ── Spatial filters ───────────────────────────────────────────────────────
+    # -- Spatial filters -------------------------------------------------------
     sf = p.add_argument_group("Spatial filters")
     geom_src = sf.add_mutually_exclusive_group()
-    geom_src.add_argument("--wkt", metavar="WKT", help="OGC WKT geometry in WGS84 (POINT, POLYGON, MULTIPOLYGON, …)")
+    geom_src.add_argument("--wkt", metavar="WKT", help="OGC WKT geometry in WGS84 (POINT, POLYGON, MULTIPOLYGON, ...)")
     geom_src.add_argument("--ullr", nargs=4, type=float, metavar=("UL_LON", "UL_LAT", "LR_LON", "LR_LAT"), help="Bounding box from upper-left / lower-right corners")
     geom_src.add_argument("--bbox", nargs=4, type=float, metavar=("MIN_LON", "MIN_LAT", "MAX_LON", "MAX_LAT"), help="Bounding box in (xmin ymin xmax ymax) order")
     geom_src.add_argument("--point", nargs=2, type=float, metavar=("LON", "LAT"), help="Point in WGS84 lon/lat.  Use --buffer for radius search.")
     geom_src.add_argument("--geojson", metavar="FILE", help="GeoJSON file.  First feature used unless --union_geojson.")
-    sf.add_argument("--buffer", type=float, metavar="DEG", help="Buffer radius in degrees for --point (converted to metres: 1° ≈ 111 km)")
+    sf.add_argument("--buffer", type=float, metavar="DEG", help="Buffer radius in degrees for --point (converted to metres: 1 deg ≈ 111 km)")
     sf.add_argument("--union_geojson", action="store_true", default=False, help="Union all GeoJSON features into a single geometry")
 
-    # ── Output ────────────────────────────────────────────────────────────────
+    # -- Output ----------------------------------------------------------------
     og = p.add_argument_group("Output")
     og.add_argument("--group", action="store_true", default=False, help="Group by (track, direction, frame) ordered by start_time. " "stdout: section headers + URLs.  --output: directory, one file per group.")
     og.add_argument("--allcrids", action="store_true", default=False, help="Return all CRID versions; default keeps only the latest per scene.")
@@ -1036,7 +1048,7 @@ def myargsparse(a):
     og.add_argument("-o", "--output", metavar="PATH", help="Without --group: output file path.  With --group: output directory.")
     og.add_argument("--format", default="url", choices=["url", "csv", "json", "geojson", "kml"], help="Output format: url (one per line), csv, json, geojson, kml")
     og.add_argument("--columns", nargs="*", metavar="COL", help="Columns for csv/json output (default: all).  " "Example: --columns product track frame crid url url_https")
-    og.add_argument("--limit", type=int, metavar="N", help="Maximum number of CMR granules to retrieve")
+    og.add_argument("--limit", type=int, metavar="N", help="Maximum total number of CMR granules to retrieve (across all query patterns)")
     og.add_argument("-v", "--verbose", action="store_true", default=False, help="Print CMR kwargs, granule count, etc. to stderr")
     og.add_argument("--dryrun", action="store_true", default=False, help="Print the CMR kwargs without logging in or searching, then exit")
 
@@ -1059,7 +1071,7 @@ def myargsparse(a):
     return args
 
 
-# ─── Entry point ───────────────────────────────────────────────────────────────
+# --- Entry point ---------------------------------------------------------------
 
 
 def _main(a):

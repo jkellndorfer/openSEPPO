@@ -1,7 +1,7 @@
 """
-openseppo.nisar.nisar_tools — NISAR GCOV processing core
+openseppo.nisar.nisar_tools -- NISAR GCOV processing core
 *********************************************************
-openSEPPO — Open SEPPO Tools
+openSEPPO -- Open SEPPO Tools
 Supporting Geospatial and Remote Sensing Data Processing
 
 (c) 2026 Earth Big Data LLC  |  https://earthbigdata.com
@@ -111,7 +111,7 @@ def _earthaccess_login(verbose=False):
         bypassing Store.__init__ (which runs a ~75 s OAuth cookie handshake).
 
         earthaccess.open() for HTTPS uses Store.get_fsspec_session(), which only
-        needs the bearer token — no OAuth cookies required.
+        needs the bearer token -- no OAuth cookies required.
         """
         from earthaccess.store import Store
 
@@ -126,7 +126,7 @@ def _earthaccess_login(verbose=False):
         store._s3_credentials = {}
         store._requests_cookies = {}
         store.in_region = False
-        # _http_session is created lazily by get_session() — no network call.
+        # _http_session is created lazily by get_session() -- no network call.
         store._http_session = auth.get_session()
         earthaccess._store = store
 
@@ -225,7 +225,7 @@ def _ensure_utm_south(crs_str, h5_handle):
     """
     s = str(crs_str).strip()
     if "+proj=utm" not in s.lower():
-        return s  # Not a UTM proj4 string — nothing to fix
+        return s  # Not a UTM proj4 string -- nothing to fix
     if "+south" in s.lower():
         return s  # Already hemisphere-aware
     try:
@@ -247,7 +247,7 @@ def _ensure_utm_south(crs_str, h5_handle):
 
 
 def _parse_crs(crs_input):
-    """Normalise EPSG string / int / WKT / CRS object → rasterio CRS."""
+    """Normalise EPSG string / int / WKT / CRS object -> rasterio CRS."""
     if crs_input is None:
         return None
     if isinstance(crs_input, CRS):
@@ -257,7 +257,7 @@ def _parse_crs(crs_input):
     s = str(crs_input).strip()
     if s.upper().startswith("EPSG:"):
         return CRS.from_epsg(int(s.split(":")[1]))
-    # Bare numeric string → treat as EPSG code (e.g. "32634" → EPSG:32634)
+    # Bare numeric string -> treat as EPSG code (e.g. "32634" -> EPSG:32634)
     if s.isdigit():
         return CRS.from_epsg(int(s))
     try:
@@ -283,7 +283,7 @@ def _get_resampling(method):
 
 def _fill_nodata_nn(data_2d):
     """
-    Fill interior NaN / ±inf pixels with the value of their nearest valid neighbour.
+    Fill interior NaN / +/-inf pixels with the value of their nearest valid neighbour.
 
     Only pixels not connected to the image-frame edge are filled.  Edge-connected
     invalid regions (layover, shadow, swath gaps that reach the frame boundary)
@@ -313,11 +313,11 @@ def _reproject_power_band(data_2d, src_transform, src_crs, dst_transform, dst_cr
                            dst_width, dst_height, resampling, fill_holes=False,
                            num_threads=None):
     """
-    Warp one 2-D float32 power array. NaN/±inf ↔ NaN nodata. Returns warped array.
+    Warp one 2-D float32 power array. NaN/+/-inf <-> NaN nodata. Returns warped array.
 
     Two-pass approach to avoid introducing extra NaN pixels:
 
-    Pass 1 — warp the data with invalid pixels (NaN/±inf) replaced by their
+    Pass 1 -- warp the data with invalid pixels (NaN/+/-inf) replaced by their
               nearest valid neighbour value (NN fill) and src_nodata=None.
               Using NN-filled values instead of 0 prevents the resampling
               kernel from mixing valid data with zeros near NaN boundaries,
@@ -326,13 +326,13 @@ def _reproject_power_band(data_2d, src_transform, src_crs, dst_transform, dst_cr
               clamps out-of-bounds kernel taps to the nearest edge pixel
               rather than treating them as NaN.
 
-    Pass 2 — warp a binary valid-pixel mask using nearest-neighbour resampling
+    Pass 2 -- warp a binary valid-pixel mask using nearest-neighbour resampling
               so each output pixel inherits the validity of its nearest source
               pixel with no kernel spreading.  Edge-connected NaN regions are
               correctly restored to NaN in the output regardless of the Pass 1
               fill, because the mask is derived from the original invalid pattern.
 
-    fill_holes — if True, interior NaN/±inf pixels (those fully enclosed by
+    fill_holes -- if True, interior NaN/+/-inf pixels (those fully enclosed by
                  valid data, not connected to the image frame edge) are filled
                  with their nearest valid neighbour BEFORE warping so they
                  remain valid in the output.  Frame-boundary nodata is
@@ -345,7 +345,7 @@ def _reproject_power_band(data_2d, src_transform, src_crs, dst_transform, dst_cr
     if fill_holes:
         src = _fill_nodata_nn(src)
 
-    invalid = ~np.isfinite(src)          # NaN and ±inf
+    invalid = ~np.isfinite(src)          # NaN and +/-inf
     valid = (~invalid).astype(np.float32)
 
     # Fill ALL invalid pixels with their nearest valid neighbour for pass 1.
@@ -376,9 +376,9 @@ def _reproject_power_band(data_2d, src_transform, src_crs, dst_transform, dst_cr
     dst_data[dst_mask == 0] = np.nan
 
     # Cubic/lanczos ringing near high-contrast boundaries can produce negative
-    # or ±inf power values.  Clamp to a physically meaningful power range:
-    #   floor : -40 dB  → 10^(-4)
-    #   ceil  : 13.329 dB → 10^(13.329/10)
+    # or +/-inf power values.  Clamp to a physically meaningful power range:
+    #   floor : -40 dB  -> 10^(-4)
+    #   ceil  : 13.329 dB -> 10^(13.329/10)
     # np.where propagates NaN, so image-edge NaN pixels are unaffected.
     _PWR_FLOOR = 10 ** (-40.0 / 10.0)        # 1e-4
     _PWR_CEIL  = 10 ** (13.329 / 10.0)       # ~21.53
@@ -716,7 +716,7 @@ def _write_h5_subset(src_f, grid_path, variable_names, col, row, w, h):
     Return bytes of a proper NetCDF-4/HDF5 subset file openable by GDAL's
     NETCDF: driver.  Uses the netCDF4 library so that named dimensions,
     _Netcdf4Dimid, _NCProperties and grid_mapping are all written correctly.
-    Avoids h5py.copy() — only targeted range reads are issued against src_f.
+    Avoids h5py.copy() -- only targeted range reads are issued against src_f.
     """
     try:
         import netCDF4 as nc_lib
@@ -748,7 +748,7 @@ def _write_h5_subset(src_f, grid_path, variable_names, col, row, w, h):
     try:
         with nc_lib.Dataset(tmp_path, "w", format="NETCDF4") as dst:
 
-            # Global attributes (skip _NC* — managed by netCDF4 library)
+            # Global attributes (skip _NC* -- managed by netCDF4 library)
             _cpattrs(src_f, dst)
 
             # Build group hierarchy and copy per-group attributes
@@ -806,7 +806,7 @@ def _write_h5_subset(src_f, grid_path, variable_names, col, row, w, h):
                           stdout=sp.DEVNULL, stderr=sp.DEVNULL)
             read_path = tmp_repacked
         except Exception:
-            read_path = tmp_path  # h5repack unavailable — use original
+            read_path = tmp_path  # h5repack unavailable -- use original
 
         with open(read_path, "rb") as fh:
             return fh.read()
@@ -877,7 +877,7 @@ def cache_to_local(url, localdir=None, keep=False, use_earthdata=False, fs=None)
     if url.startswith("https://"):
         _download_https(url, local_path, localdir, use_earthdata=use_earthdata)
     elif url.startswith("s3://"):
-        # s3:// — use aws cli (with optional earthdata S3 credentials)
+        # s3:// -- use aws cli (with optional earthdata S3 credentials)
         env = os.environ.copy()
         if use_earthdata:
             auth = earthaccess.login(strategy="netrc")
@@ -888,7 +888,7 @@ def cache_to_local(url, localdir=None, keep=False, use_earthdata=False, fs=None)
         cmd = f"aws s3 cp {url} {localdir}"
         sp.check_call(shlex.split(cmd), env=env)
     else:
-        # local file into an explicit cache dir — symlink
+        # local file into an explicit cache dir -- symlink
         os.symlink(os.path.abspath(url), local_path)
 
     print("done")
@@ -911,7 +911,7 @@ def _download_https(url, local_path, localdir, use_earthdata=False):
             if resp.status_code in (302, 303):
                 download_url = resp.headers["Location"]
             else:
-                # Could not resolve presigned URL — fall back to earthaccess
+                # Could not resolve presigned URL -- fall back to earthaccess
                 earthaccess.login(strategy="netrc")
                 earthaccess.download([url], localdir)
                 return
@@ -1102,7 +1102,7 @@ def open_datatree_lazy(path, s3_fs, verbose=False, block_size=16 * 1024 * 1024):
     if path.startswith("https://") or path.startswith("s3://"):
         return None
 
-    # Local files only — open directly by path
+    # Local files only -- open directly by path
     try:
         try:
             dt = open_datatree(path, engine="h5netcdf", phony_dims="sort", decode_timedelta=False)
@@ -1331,7 +1331,7 @@ def get_grid_info(h5_handle, frequency="A"):
         projection = _ensure_utm_south(proj_val.decode(), h5_handle)
     else:
         projection = f"EPSG:{proj_val}"
-    # NISAR grids are uniformly spaced — only read the first two values plus
+    # NISAR grids are uniformly spaced -- only read the first two values plus
     # dataset shape to get resolution and extent without fetching the full arrays.
     nx = x_ds.shape[0]
     ny = y_ds.shape[0]
@@ -1480,7 +1480,7 @@ def pwr_to_amp(pwr, scale_factor=10**8.3):
 # =========================================================
 
 
-def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, projwin, transform_mode, frequency, single_bands, vrt, downscale_factor, target_align_pixels, input_fs, output_fs, is_batch=False, cache=None, keep=False, use_earthdata=False, verbose=False, target_srs=None, target_res=None, resample="cubic", output_format="COG", fill_holes=False, num_threads=None, read_threads=8, dualpol_ratio=False):
+def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, projwin, transform_mode, frequency, single_bands, vrt, downscale_factor, target_align_pixels, input_fs, output_fs, is_batch=False, cache=None, keep=False, use_earthdata=False, verbose=False, target_srs=None, target_res=None, resample="cubic", output_format="COG", fill_holes=False, num_threads=None, read_threads=8, dualpol_ratio=False, sigma0=False):
 
     h5_basename = h5_url.split("/")[-1]
     base_name = h5_basename[:-3] if h5_basename.lower().endswith(".h5") else h5_basename
@@ -1754,7 +1754,7 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
 
             _wb(h5_out_path, h5_bytes)
             if verbose:
-                print(f"    ✓ H5 subset: {os.path.basename(h5_out_path)}", flush=True)
+                print(f"    [OK] H5 subset: {os.path.basename(h5_out_path)}", flush=True)
             files_map_h5 = {var: h5_out_path for var in variable_names}
             return {"success": True, "h5_url": h5_url, "date": date_str,
                     "files_map": files_map_h5,
@@ -1765,43 +1765,71 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
         # dualpol_ratio requires both bands in memory simultaneously, so force normal mode.
         use_low_memory_mode = (cache is not None and single_bands) and not dualpol_ratio
 
+        # Build the read list: append rtcGammaToSigmaFactor when --sigma0 is
+        # requested so it is fetched in the same parallel I/O pass (same
+        # spatial subset) as the covariance bands.
+        _sigma_var = "rtcGammaToSigmaFactor"
+        _read_vars = list(variable_names) + ([_sigma_var] if sigma0 else [])
+
         if use_low_memory_mode:
             if verbose:
                 print(f"    Low-memory mode: Processing {len(variable_names)} bands individually...", flush=True)
             # Process each band separately to minimize memory usage
             bands_data = None  # Don't load all bands at once
             data_stack = None  # Will process one at a time
+
+            # Pre-read the sigma factor once so each band can be multiplied
+            # without re-reading it.  The file is already cached locally in
+            # low-memory mode, so this is a cheap local read.
+            if sigma0:
+                _sigma_data = _read_bands_parallel(
+                    file_url, input_fs, info["grid_path"],
+                    [_sigma_var], row, h, col, w, n_workers=read_threads,
+                )[0].astype(np.float32)
+                if verbose:
+                    print(f"    Read rtcGammaToSigmaFactor for sigma0 conversion", flush=True)
+            else:
+                _sigma_data = None
         else:
             if verbose:
-                print(f"    Extracting {len(variable_names)} bands...", flush=True)
+                print(f"    Extracting {len(_read_vars)} bands...", flush=True)
                 _t_read = _time.perf_counter()
 
             # For local files use datatree if available; for remote paths use
-            # parallel h5py reads (each band×stripe gets its own file handle and
-            # S3 connection, giving N×k concurrent range requests).
+            # parallel h5py reads (each bandxstripe gets its own file handle and
+            # S3 connection, giving Nxk concurrent range requests).
             _is_remote = file_url.startswith("s3://") or file_url.startswith("https://")
             if use_datatree and not _is_remote:
                 try:
                     row_slice = slice(row, row + h)
                     col_slice = slice(col, col + w)
-                    bands_data = read_variables_datatree(dt, info["grid_path"], variable_names, row_slice, col_slice)
+                    bands_data = read_variables_datatree(dt, info["grid_path"], _read_vars, row_slice, col_slice)
                     if verbose:
-                        print(f"    ✓ Used datatree for band extraction", flush=True)
+                        print(f"    [OK] Used datatree for band extraction", flush=True)
                 except Exception as e:
                     if verbose:
-                        print(f"    ⚠ Datatree read failed, falling back to parallel h5py: {e}", flush=True)
-                    bands_data = _read_bands_parallel(file_url, input_fs, info["grid_path"], variable_names, row, h, col, w, n_workers=read_threads)
+                        print(f"    [!] Datatree read failed, falling back to parallel h5py: {e}", flush=True)
+                    bands_data = _read_bands_parallel(file_url, input_fs, info["grid_path"], _read_vars, row, h, col, w, n_workers=read_threads)
             else:
-                bands_data = _read_bands_parallel(file_url, input_fs, info["grid_path"], variable_names, row, h, col, w, n_workers=read_threads)
+                bands_data = _read_bands_parallel(file_url, input_fs, info["grid_path"], _read_vars, row, h, col, w, n_workers=read_threads)
 
             # Take magnitude of off-diagonal (complex) GCOV elements before stacking
             # to avoid dtype promotion of the whole stack to complex.
             bands_data = [np.abs(b).astype(np.float32) if np.iscomplexobj(b) else b for b in bands_data]
+
+            # Extract and apply the sigma0 conversion factor before stacking
+            if sigma0:
+                _sigma_data = bands_data.pop()  # last element is rtcGammaToSigmaFactor
+                for i in range(len(bands_data)):
+                    bands_data[i] = bands_data[i] * _sigma_data
+                if verbose:
+                    print(f"    Applied rtcGammaToSigmaFactor (gamma0 -> sigma0)", flush=True)
+
             data_stack = np.stack(bands_data)
             if verbose:
                 shape = data_stack.shape
                 mb = data_stack.nbytes / 1e6
-                print(f"    [t] data read ({shape[0]}×{shape[1]}×{shape[2]}, {mb:.1f} MB): {_time.perf_counter()-_t_read:.1f}s", flush=True)
+                print(f"    [t] data read ({shape[0]}x{shape[1]}x{shape[2]}, {mb:.1f} MB): {_time.perf_counter()-_t_read:.1f}s", flush=True)
                 _t_file = _time.perf_counter()
 
         x_center = info["x"][col]
@@ -1910,7 +1938,7 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
         _driver = "GTiff" if output_format.upper() == "GTIFF" else "COG"
         _gtiff_extra = {"bigtiff": "YES"} if _driver == "GTiff" else {}
         _n_th = str(num_threads) if num_threads is not None else "ALL_CPUS"
-        # PREDICTOR: 3=floating-point, 2=integer — improves deflate speed & ratio
+        # PREDICTOR: 3=floating-point, 2=integer -- improves deflate speed & ratio
         # pwr/dB output is float32; AMP is uint16; DN is uint8
         _predictor = 3 if transform_mode.lower() in ("pwr", "db") else 2
         _write_extra = {"num_threads": _n_th, "predictor": _predictor}
@@ -1927,7 +1955,7 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                 if verbose:
                     print(f"      [{i+1}/{len(variable_names)}] Processing {var}...", flush=True)
 
-                # Read single band — use striped parallel reads for remote files
+                # Read single band -- use striped parallel reads for remote files
                 band_data = _read_bands_parallel(
                     file_url, input_fs, info["grid_path"], [var], row, h, col, w, n_workers=read_threads
                 )[0]
@@ -1935,6 +1963,10 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                 # Take magnitude of off-diagonal (complex) GCOV elements
                 if np.iscomplexobj(band_data):
                     band_data = np.abs(band_data).astype(np.float32)
+
+                # Apply gamma0-to-sigma0 conversion (before downscaling/resampling)
+                if _sigma_data is not None:
+                    band_data = band_data * _sigma_data
 
                 # Reshape for downscaling (add band dimension)
                 band_data = band_data[np.newaxis, :, :]
@@ -1977,7 +2009,7 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                 # Remove band dimension for writing
                 band_data = band_data[0, :, :]
 
-                # Replace ±inf with NaN so COG overview averaging excludes them
+                # Replace +/-inf with NaN so COG overview averaging excludes them
                 if output_dtype == "float32":
                     band_data[~np.isfinite(band_data)] = np.nan
 
@@ -2076,7 +2108,7 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                 den_idx = variable_names.index(_ratio_den_var)
 
                 if logic_mode == "amp":
-                    # (amp_likepol / amp_crosspol) * 1000 → uint16, nodata=0, clamp [1, 65535]
+                    # (amp_likepol / amp_crosspol) * 1000 -> uint16, nodata=0, clamp [1, 65535]
                     with np.errstate(divide="ignore", invalid="ignore"):
                         ratio_data = (processed_data[num_idx].astype(np.float32) /
                                       processed_data[den_idx].astype(np.float32) * 1000.0)
@@ -2086,7 +2118,7 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                     ratio_band = ratio_data.astype(np.uint16)
 
                 elif logic_mode == "dn":
-                    # dn_likepol - dn_crosspol + 127 → uint8, nodata=0, clamp [1, 255]
+                    # dn_likepol - dn_crosspol + 127 -> uint8, nodata=0, clamp [1, 255]
                     ratio_data = (processed_data[num_idx].astype(np.float32) -
                                   processed_data[den_idx].astype(np.float32) + 127.0)
                     nodata_mask = (processed_data[num_idx] == 0) | (processed_data[den_idx] == 0)
@@ -2095,11 +2127,11 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                     ratio_band = ratio_data.astype(np.uint8)
 
                 elif logic_mode == "db":
-                    # dB_likepol - dB_crosspol → float32
+                    # dB_likepol - dB_crosspol -> float32
                     ratio_band = (processed_data[num_idx] - processed_data[den_idx]).astype(np.float32)
 
                 else:
-                    # pwr: likepol / crosspol → float32
+                    # pwr: likepol / crosspol -> float32
                     with np.errstate(divide="ignore", invalid="ignore"):
                         ratio_band = np.where(
                             processed_data[den_idx] != 0,
@@ -2110,7 +2142,7 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                 processed_data = np.concatenate([processed_data, ratio_band[np.newaxis, :, :]], axis=0)
                 variable_names = list(variable_names) + [_ratio_band_name]
 
-            # Replace ±inf with NaN so COG overview averaging excludes them
+            # Replace +/-inf with NaN so COG overview averaging excludes them
             if output_dtype == "float32":
                 processed_data[~np.isfinite(processed_data)] = np.nan
 
@@ -2193,7 +2225,7 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
 
         if verbose:
             memory_mode = "low-memory (per-band)" if use_low_memory_mode else "standard (all-bands)"
-            print(f"    ✓ Complete ({memory_mode} mode)", flush=True)
+            print(f"    [OK] Complete ({memory_mode} mode)", flush=True)
 
         return {"success": True, "h5_url": h5_url, "date": date_str, "files_map": files_map, "info": {"w": w_out, "h": h_out, "transform": out_transform, "crs": out_crs, "dtype": output_dtype}}
 
@@ -2230,7 +2262,7 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
 # =========================================================
 
 
-def process_chunk_task(h5_url, variable_names, output_path, srcwin=None, projwin=None, transform_mode="db", frequency="A", single_bands=False, vrt=False, downscale_factor=None, target_align_pixels=False, input_auth=None, output_auth=None, time_series_vrt=True, list_grids=False, cache=None, keep=False, verbose=False, target_srs=None, target_res=None, resample="cubic", output_format="COG", fill_holes=False, num_threads=None, read_threads=8, dualpol_ratio=False):
+def process_chunk_task(h5_url, variable_names, output_path, srcwin=None, projwin=None, transform_mode="db", frequency="A", single_bands=False, vrt=False, downscale_factor=None, target_align_pixels=False, input_auth=None, output_auth=None, time_series_vrt=True, list_grids=False, cache=None, keep=False, verbose=False, target_srs=None, target_res=None, resample="cubic", output_format="COG", fill_holes=False, num_threads=None, read_threads=8, dualpol_ratio=False, sigma0=False):
 
     use_earthdata = False
     if input_auth is None:
@@ -2281,7 +2313,7 @@ def process_chunk_task(h5_url, variable_names, output_path, srcwin=None, projwin
 
     try:
         # For HTTPS earthdata URLs, open_h5_lazy uses earthaccess.open() directly
-        # and ignores input_fs — skip the create_s3_fs call (and its login round-trip).
+        # and ignores input_fs -- skip the create_s3_fs call (and its login round-trip).
         _https_earthdata = use_earthdata and urls and urls[0].startswith("https://")
         input_fs = None if _https_earthdata else create_s3_fs(input_auth)
 
@@ -2351,7 +2383,7 @@ def process_chunk_task(h5_url, variable_names, output_path, srcwin=None, projwin
             output_fs = create_s3_fs(output_auth)
 
         for url in urls:
-            res = _process_single_file(url, variable_names, output_path, srcwin, projwin, transform_mode, frequency, single_bands, vrt, downscale_factor, target_align_pixels, input_fs, output_fs, is_batch=is_batch, cache=cache, keep=keep, use_earthdata=use_earthdata, verbose=verbose, target_srs=target_srs, target_res=target_res, resample=resample, output_format=output_format, fill_holes=fill_holes, num_threads=num_threads, read_threads=read_threads, dualpol_ratio=dualpol_ratio)
+            res = _process_single_file(url, variable_names, output_path, srcwin, projwin, transform_mode, frequency, single_bands, vrt, downscale_factor, target_align_pixels, input_fs, output_fs, is_batch=is_batch, cache=cache, keep=keep, use_earthdata=use_earthdata, verbose=verbose, target_srs=target_srs, target_res=target_res, resample=resample, output_format=output_format, fill_holes=fill_holes, num_threads=num_threads, read_threads=read_threads, dualpol_ratio=dualpol_ratio, sigma0=sigma0)
             results_meta.append(res)
 
         if is_batch and time_series_vrt and output_format.lower() != "h5":
@@ -2643,12 +2675,12 @@ if __name__ == "__main__":
     print(__doc__)
     print("\n" + "=" * 70)
     if HAS_DATATREE:
-        print("✓ OPTIMIZED MODE: datatree available for fast HDF5 access")
+        print("[OK] OPTIMIZED MODE: datatree available for fast HDF5 access")
         print("  - Lazy loading with spatial subsetting")
         print("  - Parallel band extraction")
         print("  - Reduced memory footprint")
     else:
-        print("⚠ FALLBACK MODE: Using h5py (slower)")
+        print("[!] FALLBACK MODE: Using h5py (slower)")
         print("  Install datatree for better performance:")
         print("    pip install xarray-datatree")
         print("    or: pip install 'xarray>=2024.2.0'")

@@ -1,4 +1,4 @@
-# seppo_nisar_gcov_convert — Examples
+# seppo_nisar_gcov_convert -- Examples
 
 `seppo_nisar_gcov_convert` converts NISAR GCOV HDF5 files to Cloud Optimized GeoTIFF (COG),
 BigTIFF (GTiff), or HDF5 subset (h5), with optional reprojection, downscaling, subsetting,
@@ -16,6 +16,7 @@ dual-pol ratio output, and VRT time-series stacking.
 - [Reprojection](#reprojection)
 - [Downscaling](#downscaling)
 - [Dual-pol ratio](#dual-pol-ratio)
+- [Sigma0 conversion](#sigma0-conversion)
 - [Subsetting](#subsetting)
 - [Output format](#output-format)
 - [VRT time-series management](#vrt-time-series-management)
@@ -47,10 +48,10 @@ Output (`-o`) is a local directory or an S3 prefix (must end in `/` for batch).
 
 | Scaling flag | Type | Conversion from dB | Nodata | Clamp |
 |--------------|------|--------------------|--------|-------|
-| *(none / `-pwr`)* | float32 | Linear power (default) | NaN | — |
-| `-dB` | float32 | `dB = 10·log10(pwr)` | NaN | — |
-| `-amp` | uint16 | `dB = 20·log10(amp) − 83` | 0 | [1, 65535] |
-| `-DN` | uint8 | `dB = −31.15 + DN × 0.15` | 0 | [1, 255] |
+| *(none / `-pwr`)* | float32 | Linear power (default) | NaN | -- |
+| `-dB` | float32 | `dB = 10*log10(pwr)` | NaN | -- |
+| `-amp` | uint16 | `dB = 20*log10(amp) - 83` | 0 | [1, 65535] |
+| `-DN` | uint8 | `dB = -31.15 + DN x 0.15` | 0 | [1, 255] |
 
 ```bash
 # Default: linear power (float32, nodata=NaN)
@@ -124,7 +125,7 @@ seppo_nisar_gcov_convert -i file.h5 -o out/ -t_srs 4326 --resample bilinear
 # Frame-boundary nodata is preserved; only interior isolated holes are filled
 seppo_nisar_gcov_convert -i file.h5 -o out/ -t_srs 4326 --fill_holes
 
-# Disable pixel-grid alignment (tap) — only relevant with -t_srs
+# Disable pixel-grid alignment (tap) -- only relevant with -t_srs
 seppo_nisar_gcov_convert -i file.h5 -o out/ -t_srs 4326 --no_tap
 
 # Control number of threads for reprojection (default: all cores)
@@ -140,11 +141,11 @@ pre-downscale factor before the warp step to improve quality and speed:
 
 | Scenario | Auto pre-downscale | Warp step |
 |---|---|---|
-| `-tr 100 100` on 20 m native, same CRS | `5×` block average (exact multiple) | none |
-| `-tr 90 90` on 20 m native, same CRS, `--resample cubic` | `2×` block average (`floor(4.5 / 2) = 2`) | 40 m → 90 m |
-| `-tr 0.001 0.001` on 20 m UTM → 4326 (native ≈ 0.00018°), `--resample cubic` | `2×` block average (`floor(5.6 / 2) = 2`) | 40 m-equiv → 0.001° |
-| `-d 4 -tr 90 90` on 20 m (explicit `-d`) | none (user `-d` respected) | 80 m → 90 m |
-| `-tr 25 25` on 20 m, same CRS, `--resample cubic` | none (ratio 1.25 < divisor 2) | 20 m → 25 m directly |
+| `-tr 100 100` on 20 m native, same CRS | `5x` block average (exact multiple) | none |
+| `-tr 90 90` on 20 m native, same CRS, `--resample cubic` | `2x` block average (`floor(4.5 / 2) = 2`) | 40 m -> 90 m |
+| `-tr 0.001 0.001` on 20 m UTM -> 4326 (native ~ 0.00018 deg), `--resample cubic` | `2x` block average (`floor(5.6 / 2) = 2`) | 40 m-equiv -> 0.001 deg |
+| `-d 4 -tr 90 90` on 20 m (explicit `-d`) | none (user `-d` respected) | 80 m -> 90 m |
+| `-tr 25 25` on 20 m, same CRS, `--resample cubic` | none (ratio 1.25 < divisor 2) | 20 m -> 25 m directly |
 
 The divisor that limits how aggressively the pre-downscale step runs depends on the
 resampling kernel: `nearest` / `average` use divisor 1 (full pre-downscale);
@@ -161,10 +162,10 @@ Downscale factor applies integer block averaging before writing. Useful for
 quick-look or browse images.
 
 ```bash
-# 5× downscale (100 m from 20 m native)
+# 5x downscale (100 m from 20 m native)
 seppo_nisar_gcov_convert -i file.h5 -o out/ -d 5
 
-# 20× downscale for thumbnail in DN with dual-pol ratio (no separate band files)
+# 20x downscale for thumbnail in DN with dual-pol ratio (no separate band files)
 seppo_nisar_gcov_convert -i file.h5 -o out/ -DN -d 20 -dpratio --no_single_bands
 ```
 
@@ -182,9 +183,38 @@ seppo_nisar_gcov_convert -i file.h5 -o out/ -dpratio
 # Dual-pol ratio in dB
 seppo_nisar_gcov_convert -i file.h5 -o out/ -dB -dpratio
 
-# 3-band browse COG (HH, HV, ratio) at 20× downscale, no separate band files
+# 3-band browse COG (HH, HV, ratio) at 20x downscale, no separate band files
 seppo_nisar_gcov_convert -i file.h5 -o out/ -DN -d 20 -dpratio --no_single_bands
 ```
+
+---
+
+## Sigma0 conversion
+
+By default, NISAR GCOV backscatter values are in gamma0 radiometric convention.
+Use `-sigma0` to convert to sigma0 by multiplying each pixel with the
+`rtcGammaToSigmaFactor` layer stored in the GCOV file. The conversion is
+applied before any downscaling or resampling, so the full-resolution factor
+is used.
+
+```bash
+# Sigma0 power output (float32)
+seppo_nisar_gcov_convert -i file.h5 -o out/ -sigma0
+
+# Sigma0 in dB
+seppo_nisar_gcov_convert -i file.h5 -o out/ -sigma0 -dB
+
+# Sigma0 with reprojection and downscaling
+seppo_nisar_gcov_convert -i file.h5 -o out/ -sigma0 -dB \
+    -t_srs 4326 -tr 0.001 0.001
+
+# Sigma0 on a geographic subset
+seppo_nisar_gcov_convert -i file.h5 -o out/ -sigma0 -amp \
+    -projwin 400000 4200000 450000 4150000
+```
+
+`-sigma0` can be combined with any scaling mode (`-pwr`, `-dB`, `-amp`, `-DN`)
+and with `-dpratio`.
 
 ---
 
@@ -366,7 +396,7 @@ of frequency A (first 2 chars) and frequency B (last 2 chars):
 | `SV` | Single V-pol |
 | `DH` | Dual H-pol (HH + HV) |
 | `DV` | Dual V-pol (VV + VH) |
-| `QP` | Quad-pol — diagonal elements (HHHH, HVHV, VHVH, VVVV) and off-diagonal elements (HHHV, HHVH, HHVV, HVVH, HVVV, VHVV) |
+| `QP` | Quad-pol -- diagonal elements (HHHH, HVHV, VHVH, VVVV) and off-diagonal elements (HHHV, HHVH, HHVV, HVVH, HVVV, VHVV) |
 | `NA` | Frequency not operated |
 
 Examples: `DHDH` (both frequencies dual-H), `SHNA` (freq A single-H, freq B off),
@@ -377,11 +407,11 @@ Examples: `DHDH` (both frequencies dual-H), `SHNA` (freq A single-H, freq B off)
 The `-EBD_<freq>_<pol>_<scaling>` suffix is appended to the NISAR base name.
 
 The `pol` field uses **2-character** lowercase prefixes for single- and dual-pol acquisitions
-(`HHHH` → `hh`, `HVHV` → `hv`, etc.), and **full 4-character** lowercase variable names
-for quad-pol (QP) acquisitions (`HHHH` → `hhhh`, `HHVV` → `hhvv`, etc.).
+(`HHHH` -> `hh`, `HVHV` -> `hv`, etc.), and **full 4-character** lowercase variable names
+for quad-pol (QP) acquisitions (`HHHH` -> `hhhh`, `HHVV` -> `hhvv`, etc.).
 
-QP is detected from token 9 of the filename: frequency A → starts with `QP` (e.g. `QPDH`);
-frequency B → ends with `QP`.
+QP is detected from token 9 of the filename: frequency A -> starts with `QP` (e.g. `QPDH`);
+frequency B -> ends with `QP`.
 
 | Acquisition | Example `-vars` | `pol` per file |
 |-------------|-----------------|----------------|
@@ -461,7 +491,7 @@ Cycle and frame ranges appear as `min-max` when more than one value is present:
 NISAR_<il>_<pt>_<prod>_<cycle_range>_<track>_<dir>_<frame_range>_<mode>_<pol>_<obs>_<min_start>_<max_end>_<acc>_<crid_prefix>-EBD_<freq>_<pol>_<mode>.vrt
 ```
 
-Example (track 064 ascending, cycles 001–005):
+Example (track 064 ascending, cycles 001-005):
 
 ```
 NISAR_L_S_GCOV_001-005_064_A_003_2000_DH_20_20250101T120000_20251201T120000_M_P-EBD_A_hh_dB.vrt
@@ -500,7 +530,7 @@ date per line (ISO `YYYY-MM-DD`), in band order:
 ## Common combined workflows
 
 ```bash
-# Full pipeline: batch HTTPS → WGS84 dB COGs + time-series VRT, fill interior holes
+# Full pipeline: batch HTTPS -> WGS84 dB COGs + time-series VRT, fill interior holes
 seppo_nisar_gcov_convert \
     -i urls.txt \
     -o s3://my-bucket/nisar/dB/ \

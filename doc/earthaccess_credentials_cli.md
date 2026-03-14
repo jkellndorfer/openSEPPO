@@ -1,4 +1,4 @@
-# seppo_earthaccess_credentials — CLI Reference
+# seppo_earthaccess_credentials -- CLI Reference
 
 Manage NASA Earthdata S3 credentials and bearer tokens for accessing
 NISAR and other Earthdata products on AWS.
@@ -24,7 +24,7 @@ seppo_earthaccess_credentials [-h] [-s] [-u] [-D DAAC] [-C COLLECTION]
 | `-C COLLECTION`, `--Collection` | DAAC collection name. Default: `NISAR`. |
 | `-t`, `--token` | Generate or refresh the Earthdata bearer token, cached at `~/.cache/openseppo/earthaccess_token.json`. Used by `seppo_nisar_gcov_convert` for direct HDF5 access. |
 | `-S`, `--show_token` | Pretty-print the cached bearer token including expiry and validity status. |
-| `-q`, `--quiet` | Quiet mode — suppresses printed credentials. Returns a dict when used from Python. |
+| `-q`, `--quiet` | Quiet mode -- suppresses printed credentials. Returns a dict when used from Python. |
 | `-h`, `--help` | Show help and exit. |
 
 ---

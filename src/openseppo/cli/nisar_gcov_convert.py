@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """
-seppo_nisar_gcov_convert — NISAR GCOV HDF5 to Cloud Optimized GeoTIFF converter
+seppo_nisar_gcov_convert -- NISAR GCOV HDF5 to Cloud Optimized GeoTIFF converter
 *********************************************************************************
-openSEPPO — Open SEPPO Tools
+openSEPPO -- Open SEPPO Tools
 Supporting Geospatial and Remote Sensing Data Processing
 
 (c) 2026 Earth Big Data LLC  |  https://earthbigdata.com
@@ -43,7 +43,7 @@ from rasterio.transform import from_origin
 import openseppo.nisar.nisar_tools as nisar_tools
 
 
-# ── seppo_parse_args shim ─────────────────────────────────────────────────────
+# -- seppo_parse_args shim -----------------------------------------------------
 # Drops the config-file override feature from seppopy.tools.args; all CLI flags
 # are preserved and work identically.
 
@@ -51,7 +51,7 @@ def seppo_parse_args(parser, a):
     return parser.parse_args(a[1:])
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 asf_buckets = ["sds-n-cumulus-prod-nisar-products", "sds-n-cumulus-prod-nisar-ur-products"]
 
@@ -100,6 +100,7 @@ def myargsparse(a):
 
     # --- Other Processing Options ---
     parser.add_argument("-dpratio", "--dualpol_ratio", action="store_true", help="Compute dual-pol power ratio: HHHH/HVHV (DH mode) or VVVV/VHVH (DV mode). Incompatible with QP or single-pol acquisitions.")
+    parser.add_argument("-sigma0", "--sigma0", action="store_true", help="Convert gamma0 backscatter to sigma0 by multiplying power values with the rtcGammaToSigmaFactor layer from the GCOV file. Applied before any downscaling or resampling.")
     parser.add_argument("-d", "--downscale", type=int, default=None, help="Downscale factor (integer). E.g., 2 for 2x2 block averaging.")
 
     # --- VRT & Output Structure ---
@@ -115,9 +116,9 @@ def myargsparse(a):
     parser.add_argument("-t_srs", "--target_srs", type=str, default=None, help="Target CRS for output (e.g. EPSG:4326 or bare 4326). If omitted, output stays in native UTM CRS.")
     parser.add_argument("-tr", "--target_res", type=float, nargs=2, metavar=("XRES", "YRES"), default=None, help="Explicit output pixel size in target CRS units (e.g. -tr 0.001 0.001 for ~100m in degrees). Only used with --target_srs.")
     parser.add_argument("--resample", type=str, default="cubic", help="Resampling method for reprojection (nearest/bilinear/cubic/cubicspline/lanczos/average). Default: cubic.")
-    parser.add_argument("--fill_holes", action="store_true", help="Fill interior NaN/±inf pixels (those enclosed by valid data) with their nearest valid neighbour. Frame-boundary nodata is unaffected. Prevents the resampling kernel from seeing isolated invalid pixels inside the valid image area.")
+    parser.add_argument("--fill_holes", action="store_true", help="Fill interior NaN/+/-inf pixels (those enclosed by valid data) with their nearest valid neighbour. Frame-boundary nodata is unaffected. Prevents the resampling kernel from seeing isolated invalid pixels inside the valid image area.")
     parser.add_argument("--warp_threads", type=int, default=None, metavar="N", help="Number of threads for reprojection. Default: all available CPU cores.")
-    parser.add_argument("--read_threads", type=int, default=8, metavar="N", help="Number of parallel S3/HTTPS connections for reading HDF5 chunks. Each band×stripe gets its own connection. Default: 8.")
+    parser.add_argument("--read_threads", type=int, default=8, metavar="N", help="Number of parallel S3/HTTPS connections for reading HDF5 chunks. Each bandxstripe gets its own connection. Default: 8.")
 
     # --- Authentication (Distinct Input/Output) ---
     parser.add_argument("--profile", type=str, help="AWS Profile name (applies to both Input and Output unless overridden).")
@@ -357,7 +358,7 @@ def _track_vrt_filename(metas, pol_str, mode_str):
     Build a NISAR time-series VRT filename from a list of metadata dicts.
 
     Unique (track, direction, frame) combos are sorted by (track, direction, frame).
-    For ≤4 combos the track, direction, and frame tokens are each hyphen-joined in
+    For <=4 combos the track, direction, and frame tokens are each hyphen-joined in
     combo order (preserving the pairing).  For >4 combos the tokens collapse to
     "999", all-directions (A, D, or A-D), "999".
     """
@@ -538,10 +539,10 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
             frames_in_group = sorted({m["frame"] for m in td_metas})
 
             if len(frames_in_group) > 1:
-                # ── Multiple frames: mosaic per cycle, then time-series over mosaics ──
+                # -- Multiple frames: mosaic per cycle, then time-series over mosaics --
                 if verbose:
                     print(f"    Track {track:03d}/{direction}: "
-                          f"{len(frames_in_group)} frames → mosaic VRTs")
+                          f"{len(frames_in_group)} frames -> mosaic VRTs")
 
                 by_cycle = defaultdict(list)
                 for m in td_metas:
@@ -587,7 +588,7 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
                 track_dir_ts[(track, direction)] = {"ts_items": mosaic_items, "metas": td_metas}
 
             else:
-                # ── Single frame: build time-series directly from TIF files ──
+                # -- Single frame: build time-series directly from TIF files --
                 sorted_metas = sorted(td_metas, key=lambda x: x["start_time"])
                 ts_items = []
                 for m in sorted_metas:
@@ -734,7 +735,7 @@ def processing(args):
     print(f"Mode: {args.mode} | Freq: {args.freq} | Downscale: {args.downscale}")
 
     try:
-        result = nisar_tools.process_chunk_task(h5_url=urls, variable_names=args.vars, output_path=args.output, srcwin=tuple(args.srcwin) if args.srcwin else None, projwin=tuple(args.projwin) if args.projwin else None, transform_mode=args.mode, frequency=args.freq, single_bands=args.single_bands, vrt=(not args.no_vrt), downscale_factor=args.downscale, target_align_pixels=(not args.no_tap), input_auth=input_auth, output_auth=output_auth, time_series_vrt=(not args.no_time_series), list_grids=args.list_grids, verbose=args.verbose, cache=args.cache, keep=args.keep_cached, target_srs=args.target_srs, target_res=args.target_res, resample=args.resample, output_format=args.output_format, fill_holes=args.fill_holes, num_threads=args.warp_threads, read_threads=args.read_threads, dualpol_ratio=args.dualpol_ratio)
+        result = nisar_tools.process_chunk_task(h5_url=urls, variable_names=args.vars, output_path=args.output, srcwin=tuple(args.srcwin) if args.srcwin else None, projwin=tuple(args.projwin) if args.projwin else None, transform_mode=args.mode, frequency=args.freq, single_bands=args.single_bands, vrt=(not args.no_vrt), downscale_factor=args.downscale, target_align_pixels=(not args.no_tap), input_auth=input_auth, output_auth=output_auth, time_series_vrt=(not args.no_time_series), list_grids=args.list_grids, verbose=args.verbose, cache=args.cache, keep=args.keep_cached, target_srs=args.target_srs, target_res=args.target_res, resample=args.resample, output_format=args.output_format, fill_holes=args.fill_holes, num_threads=args.warp_threads, read_threads=args.read_threads, dualpol_ratio=args.dualpol_ratio, sigma0=args.sigma0)
         print("\n" + str(result))
 
         # 5. Build per-track (and combined A+D) time-series VRTs

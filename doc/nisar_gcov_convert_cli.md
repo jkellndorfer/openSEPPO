@@ -1,4 +1,4 @@
-# seppo_nisar_gcov_convert — CLI Reference
+# seppo_nisar_gcov_convert -- CLI Reference
 
 Convert NISAR HDF5 GCOV data to Cloud Optimized GeoTIFF (COG) with optional VRT stacking.
 
@@ -10,7 +10,7 @@ Convert NISAR HDF5 GCOV data to Cloud Optimized GeoTIFF (COG) with optional VRT 
 seppo_nisar_gcov_convert [-h] [-i H5 [H5 ...]] [-o OUTPUT]
                          [-vars VARS [VARS ...]] [-f {A,B}] [-lg]
                          [-DN | -amp | -dB | -pwr] [-of {COG,GTiff,h5}]
-                         [-dpratio] [-d DOWNSCALE] [--no_vrt]
+                         [-dpratio] [-sigma0] [-d DOWNSCALE] [--no_vrt]
                          [--no_time_series] [--no_single_bands]
                          [-srcwin XOFF YOFF XSIZE YSIZE | -projwin ULX ULY LRX LRY]
                          [--no_tap] [-t_srs TARGET_SRS] [-tr XRES YRES]
@@ -45,11 +45,12 @@ seppo_nisar_gcov_convert [-h] [-i H5 [H5 ...]] [-o OUTPUT]
 
 | Argument | Description |
 |----------|-------------|
-| `-DN` | DN mode: uint8 scaled 1–255. `dB = -31.15 + DN × 0.15` (range -31 to +7.1 dB). DN=0 is nodata. |
+| `-DN` | DN mode: uint8 scaled 1-255. `dB = -31.15 + DN x 0.15` (range -31 to +7.1 dB). DN=0 is nodata. |
 | `-amp` | Amplitude mode: uint16. |
 | `-dB` | dB mode: float32. |
 | `-pwr` | Power mode: raw float32 (default). |
 | `-dpratio`, `--dualpol_ratio` | Compute dual-pol power ratio: HHHH/HVHV (DH mode) or VVVV/VHVH (DV mode). Incompatible with QP or single-pol acquisitions. |
+| `-sigma0`, `--sigma0` | Convert gamma0 backscatter to sigma0 by multiplying power values with the `rtcGammaToSigmaFactor` layer from the GCOV file. Applied before any downscaling or resampling. |
 
 ### Spatial Subsetting
 
@@ -65,9 +66,9 @@ seppo_nisar_gcov_convert [-h] [-i H5 [H5 ...]] [-o OUTPUT]
 | `-t_srs TARGET_SRS` | Target CRS for output (e.g. `EPSG:4326` or bare `4326`). If omitted, output stays in native UTM. |
 | `-tr XRES YRES` | Explicit output pixel size in target CRS units (e.g. `-tr 0.001 0.001` for ~100 m in degrees). Triggers auto pre-downscaling when a large reduction factor is implied. |
 | `--resample` | Resampling method: `nearest`, `bilinear`, `cubic` (default), `cubicspline`, `lanczos`, `average`. |
-| `--fill_holes` | Fill interior NaN/±inf pixels with their nearest valid neighbour before resampling. Frame-boundary nodata is unaffected. |
+| `--fill_holes` | Fill interior NaN/+/-inf pixels with their nearest valid neighbour before resampling. Frame-boundary nodata is unaffected. |
 | `--no_tap` | Disable pixel-grid alignment. By default the output origin is snapped to integer multiples of the target pixel size. |
-| `-d DOWNSCALE`, `--downscale` | Manual downscale factor (integer). E.g. `2` for 2×2 block averaging. |
+| `-d DOWNSCALE`, `--downscale` | Manual downscale factor (integer). E.g. `2` for 2x2 block averaging. |
 | `--warp_threads N` | Number of threads for reprojection. Default: all available CPU cores. |
 | `--read_threads N` | Number of parallel S3/HTTPS connections for reading HDF5 chunks. Default: 8. |
 
@@ -107,7 +108,7 @@ seppo_nisar_gcov_convert [-h] [-i H5 [H5 ...]] [-o OUTPUT]
 usage: nisar_gcov_convert.py [-h] [-i H5 [H5 ...]] [-o OUTPUT]
                              [-vars VARS [VARS ...]] [-f {A,B}] [-lg]
                              [-DN | -amp | -dB | -pwr] [-of {COG,GTiff,h5}]
-                             [-dpratio] [-d DOWNSCALE] [--no_vrt]
+                             [-dpratio] [-sigma0] [-d DOWNSCALE] [--no_vrt]
                              [--no_time_series] [--no_single_bands]
                              [-srcwin XOFF YOFF XSIZE YSIZE | -projwin ULX ULY LRX LRY]
                              [--no_tap] [-t_srs TARGET_SRS] [-tr XRES YRES]
@@ -144,6 +145,8 @@ options:
   -dpratio, --dualpol_ratio
                         Compute dual-pol power ratio: HHHH/HVHV (DH mode) or
                         VVVV/VHVH (DV mode).
+  -sigma0, --sigma0     Convert gamma0 to sigma0 using rtcGammaToSigmaFactor.
+                        Applied before downscaling or resampling.
   -d DOWNSCALE, --downscale DOWNSCALE
                         Downscale factor (integer). E.g., 2 for 2x2 block
                         averaging.
@@ -162,7 +165,7 @@ options:
   --resample RESAMPLE   Resampling method for reprojection
                         (nearest/bilinear/cubic/cubicspline/lanczos/average).
                         Default: cubic.
-  --fill_holes          Fill interior NaN/±inf pixels with nearest valid
+  --fill_holes          Fill interior NaN/+/-inf pixels with nearest valid
                         neighbour before resampling.
   --warp_threads N      Number of threads for reprojection. Default: all cores.
   --read_threads N      Number of parallel S3/HTTPS connections. Default: 8.

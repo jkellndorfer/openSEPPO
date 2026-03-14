@@ -1,5 +1,5 @@
 """
-openSEPPO — Open SEPPO Tools
+openSEPPO -- Open SEPPO Tools
 Supporting Geospatial and Remote Sensing Data Processing
 
 (c) 2026 Earth Big Data LLC  |  https://earthbigdata.com
@@ -12,8 +12,8 @@ Earth Big Data (https://earthbigdata.com/seppo).
 
 Subpackages
 -----------
-openseppo.nisar   — NISAR GCOV data search, download, and COG conversion
-openseppo.cli     — Command-line entry points
+openseppo.nisar   -- NISAR GCOV data search, download, and COG conversion
+openseppo.cli     -- Command-line entry points
 """
 
 from importlib.metadata import version, PackageNotFoundError
