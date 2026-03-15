@@ -527,7 +527,7 @@ def _downscale_block(data_3d, factor, method="mean"):
         min_val = np.min(int_view, axis=(2, 4))
         result = np.where(max_val == 255, np.uint8(255),
                  np.where(min_val == 0, np.uint8(0), max_val))
-        return result.astype(np.float32)[np.newaxis, :, :]  # keep (1, H, W) shape
+        return result.astype(np.float32)  # (1, new_h, new_w) — preserves input band dim
 
     with np.errstate(invalid="ignore"):
         if method == "sum":
