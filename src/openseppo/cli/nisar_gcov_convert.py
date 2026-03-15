@@ -412,7 +412,7 @@ def _list_vrts_in_dir(out_dir, output_fs):
 def _list_ancillary_tifs(output_path, frequency, output_fs=None):
     """List ancillary TIF files (mask, nlooks, gamma2sigma) in output_path."""
     _anc_suffixes = ("_mask.tif", "_nlooks.tif", "_gamma2sigma.tif")
-    tag = f"-EBD_{frequency}_"
+    tag = f"-EBD_{frequency}"
     if output_fs:
         bucket_path = output_path.replace("s3://", "")
         try:
