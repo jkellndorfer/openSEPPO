@@ -316,73 +316,43 @@ def _reproject_power_band(data_2d, src_transform, src_crs, dst_transform, dst_cr
     """
     Warp one 2-D float32 power array. NaN/+/-inf <-> NaN nodata. Returns warped array.
 
-    Two-pass approach to avoid introducing extra NaN pixels:
-
-    Pass 1 -- warp the data with invalid pixels (NaN/+/-inf) replaced by their
-              nearest valid neighbour value (NN fill) and src_nodata=None.
-              Using NN-filled values instead of 0 prevents the resampling
-              kernel from mixing valid data with zeros near NaN boundaries,
-              which would otherwise produce floor-clamped artefacts (e.g.
-              -40 dB) at swath edges.  With no declared source nodata GDAL
-              clamps out-of-bounds kernel taps to the nearest edge pixel
-              rather than treating them as NaN.
-
-    Pass 2 -- warp a binary valid-pixel mask using nearest-neighbour resampling
-              so each output pixel inherits the validity of its nearest source
-              pixel with no kernel spreading.  Edge-connected NaN regions are
-              correctly restored to NaN in the output regardless of the Pass 1
-              fill, because the mask is derived from the original invalid pattern.
+    Single-pass warp with src_nodata=NaN. GDAL 3.x+ correctly excludes NaN
+    from cubic/lanczos kernels, preserving edge nodata without the memory-heavy
+    scipy distance_transform + second mask warp that the old two-pass approach
+    required.
 
     fill_holes -- if True, interior NaN/+/-inf pixels (those fully enclosed by
                  valid data, not connected to the image frame edge) are filled
                  with their nearest valid neighbour BEFORE warping so they
-                 remain valid in the output.  Frame-boundary nodata is
-                 unaffected and still propagates to NaN in the output.
+                 remain valid in the output. Uses scipy (higher memory); only
+                 runs when the user explicitly requests --fill_holes.
+                 Frame-boundary nodata is unaffected.
     """
-    from scipy.ndimage import distance_transform_edt
-
     src = data_2d.astype(np.float32)
+    src[~np.isfinite(src)] = np.nan
 
     if fill_holes:
         src = _fill_nodata_nn(src)
 
-    invalid = ~np.isfinite(src)          # NaN and +/-inf
-    valid = (~invalid).astype(np.float32)
-
-    # Fill ALL invalid pixels with their nearest valid neighbour for pass 1.
-    # This gives the resampling kernel physically meaningful values instead of
-    # zeros, preventing floor-clamped artefacts at swath/image boundaries.
-    if invalid.any():
-        row_idx, col_idx = distance_transform_edt(
-            invalid, return_distances=False, return_indices=True)
-        filled = src.copy()
-        filled[invalid] = src[row_idx[invalid], col_idx[invalid]]
-    else:
-        filled = src
-
     n_threads = num_threads if num_threads is not None else os.cpu_count() or 1
 
-    kw = dict(src_transform=src_transform, src_crs=src_crs,
-              dst_transform=dst_transform, dst_crs=dst_crs,
-              src_nodata=None, num_threads=n_threads)
-
     dst_data = np.full((dst_height, dst_width), np.nan, dtype=np.float32)
-    dst_mask = np.zeros((dst_height, dst_width), dtype=np.float32)
 
-    reproject(source=filled, destination=dst_data,
-              resampling=resampling, dst_nodata=np.nan, **kw)
-    reproject(source=valid, destination=dst_mask,
-              resampling=Resampling.nearest, dst_nodata=0.0, **kw)
+    reproject(
+        source=src, destination=dst_data,
+        src_transform=src_transform, src_crs=src_crs,
+        dst_transform=dst_transform, dst_crs=dst_crs,
+        src_nodata=np.nan, dst_nodata=np.nan,
+        resampling=resampling,
+        num_threads=n_threads,
+    )
 
-    dst_data[dst_mask == 0] = np.nan
+    del src
+    gc.collect()
 
-    # Cubic/lanczos ringing near high-contrast boundaries can produce negative
-    # or +/-inf power values.  Clamp to a physically meaningful power range:
-    #   floor : -40 dB  -> 10^(-4)
-    #   ceil  : 13.329 dB -> 10^(13.329/10)
-    # np.where propagates NaN, so image-edge NaN pixels are unaffected.
-    _PWR_FLOOR = 10 ** (-40.0 / 10.0)        # 1e-4
-    _PWR_CEIL  = 10 ** (13.329 / 10.0)       # ~21.53
+    # Clamp to physically meaningful power range (cubic/lanczos ringing).
+    _PWR_FLOOR = 1e-4                        # -40 dB
+    _PWR_CEIL = 10 ** (13.329 / 10.0)        # ~21.53
     finite = np.isfinite(dst_data)
     dst_data = np.where(finite, np.clip(dst_data, _PWR_FLOOR, _PWR_CEIL), dst_data)
 
