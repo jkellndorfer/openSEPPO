@@ -1724,8 +1724,16 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
         if acq_meta is None:
             acq_meta = get_acquisition_metadata(f)
 
-        # Inject processing metadata into the tag dict
-        acq_meta["RADIOMETRY"] = "sigma0" if sigma0 else "gamma0"
+        # Inject processing metadata into the tag dict.
+        # RADIOMETRY and DB_FORMULA are added per-band (backscatter only).
+        _radiometry = "sigma0" if sigma0 else "gamma0"
+        _db_formulas = {
+            "pwr": "dB = 10*log10(DN)",
+            "db":  "dB = DN",
+            "amp": "dB = 20*log10(DN) - 83",
+            "dn":  "dB = -31.15 + DN*0.15",
+        }
+        _db_formula = _db_formulas.get(logic_mode, "")
         try:
             from importlib.metadata import version as _pkg_version
             acq_meta["OPENSEPPO_VERSION"] = _pkg_version("openseppo")
@@ -2227,12 +2235,18 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
 
                 profile = {"driver": _driver, "height": h_out, "width": w_out, "count": 1, "dtype": output_dtype, "crs": out_crs, "transform": out_transform, "compress": "deflate", "nodata": output_nodata, **_gtiff_extra, **_band_write}
 
+                _band_tags = dict(acq_meta)
+                if not _var_is_anc:
+                    _band_tags["RADIOMETRY"] = _radiometry
+                    if _db_formula:
+                        _band_tags["DB_FORMULA"] = _db_formula
+
                 with rasterio.Env(GDAL_NUM_THREADS=_n_th, GDAL_OVR_PROPAGATE_NODATA="NO"):
                     with MemoryFile() as memfile:
                         with memfile.open(**profile) as dst:
                             dst.write(band_data, 1)
                             dst.set_band_description(1, var)
-                            dst.update_tags(**acq_meta)
+                            dst.update_tags(**_band_tags)
                             dst.update_tags(1, Date=date_str)
                         memfile.seek(0)
                         write_bytes(band_path, memfile.read())
@@ -2242,9 +2256,11 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                 # Free memory immediately
                 del band_data
 
-            # VRT generation for low-memory mode
-            if vrt:
-                pol_list_str = "".join(v.lower() if _is_qp else v[:2].lower() for v in variable_names)
+            # VRT generation for low-memory mode -- backscatter bands only
+            _bsc_files = [files_map[v] for v in variable_names if not _is_ancillary(v)]
+            _bsc_vars = [v for v in variable_names if not _is_ancillary(v)]
+            if vrt and _bsc_files:
+                pol_list_str = "".join(v.lower() if _is_qp else v[:2].lower() for v in _bsc_vars)
                 vrt_suffix = f"-EBD_{frequency}_{pol_list_str}_{mode_str}.vrt"
 
                 if final_path.endswith(".tif"):
@@ -2252,8 +2268,10 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                 else:
                     vrt_path = final_path + vrt_suffix
 
-                # Note: Pass output_dtype to ensure correct VRT Mapping (e.g. uint8 -> Byte)
-                vrt_xml = generate_vrt_xml_single_step(w_out, h_out, out_transform, out_crs, generated_files, variable_names, date_str, dtype=output_dtype, metadata=acq_meta)
+                _vrt_meta = dict(acq_meta, RADIOMETRY=_radiometry)
+                if _db_formula:
+                    _vrt_meta["DB_FORMULA"] = _db_formula
+                vrt_xml = generate_vrt_xml_single_step(w_out, h_out, out_transform, out_crs, _bsc_files, _bsc_vars, date_str, dtype=output_dtype, metadata=_vrt_meta)
                 if verbose:
                     print(f"    Generated Snapshot VRT: {vrt_path}", flush=True)
                 write_bytes(vrt_path, vrt_xml.encode("utf-8"))
@@ -2432,12 +2450,18 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
 
                     profile = {"driver": _driver, "height": h_out, "width": w_out, "count": 1, "dtype": _bd_dtype, "crs": out_crs, "transform": out_transform, "compress": "deflate", "nodata": _bd_nodata, **_gtiff_extra, **_band_write}
 
+                    _band_tags = dict(acq_meta)
+                    if not _var_is_anc:
+                        _band_tags["RADIOMETRY"] = _radiometry
+                        if _db_formula:
+                            _band_tags["DB_FORMULA"] = _db_formula
+
                     with rasterio.Env(GDAL_OVR_PROPAGATE_NODATA="NO"):
                         with MemoryFile() as memfile:
                             with memfile.open(**profile) as dst:
                                 dst.write(band_data, 1)
                                 dst.set_band_description(1, var)
-                                dst.update_tags(**acq_meta)
+                                dst.update_tags(**_band_tags)
                                 dst.update_tags(1, Date=date_str)
                             memfile.seek(0)
                             write_bytes(band_path, memfile.read())
@@ -2448,12 +2472,15 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                     sz = sum(os.path.getsize(p) for p in generated_files if os.path.isfile(p))
                     print(f"    [t] COG write ({len(generated_files)} bands, {sz/1e6:.1f} MB): {_time.perf_counter()-_t_write:.1f}s", flush=True)
 
-                if vrt:
+                # Snapshot VRT -- backscatter bands only (ancillary kept as separate TIFs)
+                _bsc_files = [files_map[v] for v in variable_names if not _is_ancillary(v)]
+                _bsc_vars = [v for v in variable_names if not _is_ancillary(v)]
+                if vrt and _bsc_files:
                     if _ratio_pol_override:
-                        _src_vars = [v for v in variable_names if v != _ratio_band_name]
+                        _src_vars = [v for v in _bsc_vars if v != _ratio_band_name]
                         pol_list_str = "".join(v[:2].lower() for v in _src_vars) + _ratio_pol_override
                     else:
-                        pol_list_str = "".join(v.lower() if _is_qp else v[:2].lower() for v in variable_names)
+                        pol_list_str = "".join(v.lower() if _is_qp else v[:2].lower() for v in _bsc_vars)
                     vrt_suffix = f"-EBD_{frequency}_{pol_list_str}_{mode_str}.vrt"
 
                     if final_path.endswith(".tif"):
@@ -2461,32 +2488,64 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                     else:
                         vrt_path = final_path + vrt_suffix
 
-                    # Note: Pass output_dtype to ensure correct VRT Mapping (e.g. uint8 -> Byte)
-                    vrt_xml = generate_vrt_xml_single_step(w_out, h_out, out_transform, out_crs, generated_files, variable_names, date_str, dtype=output_dtype, metadata=acq_meta)
+                    _vrt_meta = dict(acq_meta, RADIOMETRY=_radiometry)
+                    if _db_formula:
+                        _vrt_meta["DB_FORMULA"] = _db_formula
+                    vrt_xml = generate_vrt_xml_single_step(w_out, h_out, out_transform, out_crs, _bsc_files, _bsc_vars, date_str, dtype=output_dtype, metadata=_vrt_meta)
                     if verbose:
                         print(f"    Generated Snapshot VRT: {vrt_path}", flush=True)
                     write_bytes(vrt_path, vrt_xml.encode("utf-8"))
             else:
+                # Multi-band COG: backscatter bands only; ancillary written as separate TIFs
                 if verbose:
                     print("    Writing Multi-band COG...", flush=True)
                     _t_write = _time.perf_counter()
-                profile = {"driver": _driver, "height": h_out, "width": w_out, "count": len(variable_names), "dtype": output_dtype, "crs": out_crs, "transform": out_transform, "compress": "deflate", "nodata": output_nodata, **_gtiff_extra, **_write_extra}
+                _bsc_vars = [v for v in variable_names if not _is_ancillary(v)]
+                _mb_tags = dict(acq_meta, RADIOMETRY=_radiometry)
+                if _db_formula:
+                    _mb_tags["DB_FORMULA"] = _db_formula
+                profile = {"driver": _driver, "height": h_out, "width": w_out, "count": processed_data.shape[0], "dtype": output_dtype, "crs": out_crs, "transform": out_transform, "compress": "deflate", "nodata": output_nodata, **_gtiff_extra, **_write_extra}
                 with rasterio.Env(GDAL_NUM_THREADS=_n_th, GDAL_OVR_PROPAGATE_NODATA="NO"):
                     with MemoryFile() as memfile:
                         with memfile.open(**profile) as dst:
                             dst.write(processed_data)
-                            for i, var in enumerate(variable_names):
+                            for i, var in enumerate(_bsc_vars):
                                 dst.set_band_description(i + 1, var)
                                 dst.update_tags(i + 1, Date=date_str)
-                            dst.update_tags(**acq_meta)
+                            dst.update_tags(**_mb_tags)
                         memfile.seek(0)
                         write_bytes(final_path, memfile.read())
 
-                for var in variable_names:
+                for var in _bsc_vars:
                     files_map[var] = final_path
+
+                # Write ancillary bands as separate TIFs
+                for var, arr in _anc_data.items():
+                    _anc_suf = f"-EBD_{frequency}_{_ancillary_suffix(var)}.tif"
+                    band_path = (final_path[:-4] if final_path.endswith(".tif") else final_path) + _anc_suf
+                    _ad = _ancillary_out_dtype(var)
+                    _an = _ancillary_nodata(var)
+                    _ap = 2 if _ad in ("uint8", "uint16") else 3
+                    _aw = dict(_write_extra, predictor=_ap)
+                    if var == "mask" and _driver == "COG":
+                        _aw["overview_resampling"] = "nearest"
+                    band_out = np.nan_to_num(arr, nan=float(_an)).astype(np.uint8) if _ad == "uint8" else arr
+                    _profile = {"driver": _driver, "height": h_out, "width": w_out, "count": 1, "dtype": _ad, "crs": out_crs, "transform": out_transform, "compress": "deflate", "nodata": _an, **_gtiff_extra, **_aw}
+                    with rasterio.Env(GDAL_OVR_PROPAGATE_NODATA="NO"):
+                        with MemoryFile() as memfile:
+                            with memfile.open(**_profile) as dst:
+                                dst.write(band_out, 1)
+                                dst.set_band_description(1, var)
+                                dst.update_tags(**acq_meta)
+                                dst.update_tags(1, Date=date_str)
+                            memfile.seek(0)
+                            write_bytes(band_path, memfile.read())
+                    files_map[var] = band_path
+
                 if verbose:
-                    sz = os.path.getsize(final_path) if os.path.isfile(final_path) else 0
-                    print(f"    [t] COG write ({len(variable_names)} bands, {sz/1e6:.1f} MB): {_time.perf_counter()-_t_write:.1f}s", flush=True)
+                    _all_files = [final_path] + [files_map[v] for v in _anc_data]
+                    sz = sum(os.path.getsize(p) for p in _all_files if os.path.isfile(p))
+                    print(f"    [t] COG write ({processed_data.shape[0]}+{len(_anc_data)} bands, {sz/1e6:.1f} MB): {_time.perf_counter()-_t_write:.1f}s", flush=True)
 
         if verbose:
             memory_mode = "low-memory (per-band)" if use_low_memory_mode else "standard (all-bands)"
@@ -2686,13 +2745,29 @@ def process_chunk_task(h5_url, variable_names, output_path, srcwin=None, projwin
                     with open(path, "wb") as f_out:
                         f_out.write(bytes_data)
 
+            # Separate backscatter and ancillary variables; track backscatter-only index
+            _bsc_vars_ts = [v for v in variable_names if not _is_ancillary(v)]
+            _bsc_idx_map = {v: i for i, v in enumerate(_bsc_vars_ts)}
+
             for var_idx, var in enumerate(variable_names):
-                pol_str = var[:2].lower()
+                _var_is_anc = _is_ancillary(var)
+                if _var_is_anc:
+                    pol_str = _ancillary_suffix(var)
+                    _ts_dtype = _ancillary_out_dtype(var)
+                else:
+                    pol_str = var[:2].lower()
+                    _ts_dtype = ref_info["dtype"]
+
                 stack_items = []
                 dates_list = []
                 for r in valid_results:
                     fpath = r["files_map"][var]
-                    b_idx = 1 if single_bands else (var_idx + 1)
+                    if _var_is_anc:
+                        b_idx = 1  # ancillary always separate TIFs
+                    elif single_bands:
+                        b_idx = 1
+                    else:
+                        b_idx = _bsc_idx_map[var] + 1
                     item = {"path": fpath, "band_idx": b_idx, "date": r["date"]}
                     if not all_same_geom:
                         item["transform"] = r["info"]["transform"]
@@ -2701,13 +2776,16 @@ def process_chunk_task(h5_url, variable_names, output_path, srcwin=None, projwin
                     stack_items.append(item)
                     dates_list.append(r["date"].replace("-", ""))
 
-                # Note: Pass output_dtype to ensure correct VRT Mapping (e.g. uint8 -> Byte)
                 if all_same_geom:
-                    vrt_xml = generate_vrt_xml_timeseries(ref_info["w"], ref_info["h"], ref_info["transform"], ref_info["crs"], stack_items, dtype=ref_info["dtype"])
+                    vrt_xml = generate_vrt_xml_timeseries(ref_info["w"], ref_info["h"], ref_info["transform"], ref_info["crs"], stack_items, dtype=_ts_dtype)
                 else:
-                    vrt_xml = generate_vrt_xml_timeseries_union(ref_info["crs"], stack_items, dtype=ref_info["dtype"])
+                    vrt_xml = generate_vrt_xml_timeseries_union(ref_info["crs"], stack_items, dtype=_ts_dtype)
 
-                vrt_name = construct_timeseries_filename(valid_results[0]["h5_url"], min_date, max_date, frequency, pol_str, mode_str)
+                # Ancillary layers use their suffix directly; backscatter uses pol+mode
+                if _var_is_anc:
+                    vrt_name = construct_timeseries_filename(valid_results[0]["h5_url"], min_date, max_date, frequency, pol_str, "")
+                else:
+                    vrt_name = construct_timeseries_filename(valid_results[0]["h5_url"], min_date, max_date, frequency, pol_str, mode_str)
                 out_dir = output_path.rstrip("/")
                 vrt_full_path = f"{out_dir}/{vrt_name}"
                 if verbose:
