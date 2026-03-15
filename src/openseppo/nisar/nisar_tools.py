@@ -1943,6 +1943,14 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
         # MEMORY OPTIMIZATION: When using cache with single_bands, process one variable at a time
         # to reduce memory footprint (important for large files on smaller RAM).
         # dualpol_ratio requires both bands in memory simultaneously, so force normal mode.
+        # When dualpol_ratio is active, strip ancillary vars to avoid holding
+        # them in the full stack — process ancillary in a separate run.
+        if dualpol_ratio:
+            _dropped_anc = [v for v in variable_names if _is_ancillary(v)]
+            if _dropped_anc:
+                variable_names = [v for v in variable_names if not _is_ancillary(v)]
+                print(f"    Note: ancillary grids ({', '.join(_dropped_anc)}) skipped with -dpratio. "
+                      f"Process them in a separate run without -dpratio.", flush=True)
         use_low_memory_mode = (cache is not None and single_bands) and not dualpol_ratio
 
         # Build the read list: append rtcGammaToSigmaFactor when --sigma0 is
@@ -2298,29 +2306,6 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
             else:
                 data_stack = np.empty((0,) + data_stack.shape[1:], dtype=np.float32)
 
-            # -- Check available memory before heavy processing --
-            _n_total = data_stack.shape[0] + len(_anc_data)
-            if needs_reproject and warp_kw is not None and _n_total > 0:
-                _dst_pixels = warp_kw["dst_height"] * warp_kw["dst_width"]
-            elif data_stack.shape[0] > 0:
-                _dst_pixels = data_stack.shape[1] * data_stack.shape[2]
-            else:
-                _dst_pixels = 0
-            # Peak: source stack + destination stack + warp buffers (~3x per band)
-            _peak_bytes = int(_n_total * 3 * _dst_pixels * 4)
-            try:
-                import psutil
-                _avail = psutil.virtual_memory().available
-            except ImportError:
-                _avail = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_AVPHYS_PAGES")
-            if _peak_bytes > _avail:
-                raise MemoryError(
-                    f"Estimated peak memory {_peak_bytes / 1e9:.1f} GB exceeds "
-                    f"available {_avail / 1e9:.1f} GB. "
-                    f"Use -projwin to subset, -d to downscale, "
-                    f"or process ancillary grids in a separate run."
-                )
-
             # -- Downscale backscatter (nanmean) --
             if downscale_factor and downscale_factor > 1:
                 if verbose:
@@ -2339,32 +2324,24 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                     _n_anc = len(_anc_data)
                     _est_gb = (_n_bsc * 2 + _n_anc) * warp_kw["dst_height"] * warp_kw["dst_width"] * 4 / 1e9
                     print(f"    Reprojecting {_n_bsc} backscatter + {_n_anc} ancillary bands (~{_est_gb:.1f} GB)...", flush=True)
-                try:
-                    if data_stack.shape[0] > 0:
-                        n_bsc = data_stack.shape[0]
-                        warped = np.full((n_bsc, warp_kw["dst_height"], warp_kw["dst_width"]), np.nan, dtype=np.float32)
-                        for bi in range(n_bsc):
-                            warped[bi] = _reproject_power_band(data_stack[bi], **warp_kw)
-                        data_stack = warped
-                    for vname, arr in _anc_data.items():
-                        _anc_data[vname] = _reproject_ancillary_band(
-                            arr,
-                            src_transform=warp_kw["src_transform"],
-                            src_crs=warp_kw["src_crs"],
-                            dst_transform=warp_kw["dst_transform"],
-                            dst_crs=warp_kw["dst_crs"],
-                            dst_width=warp_kw["dst_width"],
-                            dst_height=warp_kw["dst_height"],
-                            resample_name=_ancillary_warp_resampling(vname),
-                            num_threads=warp_kw.get("num_threads"),
-                        )
-                except MemoryError:
-                    print(f"!!! Out of memory reprojecting {h5_basename}. "
-                          f"Try adding -d 2 (or higher) to downscale first, "
-                          f"or use -projwin/-srcwin to process a smaller area, "
-                          f"or process backscatter and ancillary in separate runs.",
-                          file=sys.stderr, flush=True)
-                    raise
+                if data_stack.shape[0] > 0:
+                    n_bsc = data_stack.shape[0]
+                    warped = np.full((n_bsc, warp_kw["dst_height"], warp_kw["dst_width"]), np.nan, dtype=np.float32)
+                    for bi in range(n_bsc):
+                        warped[bi] = _reproject_power_band(data_stack[bi], **warp_kw)
+                    data_stack = warped
+                for vname, arr in _anc_data.items():
+                    _anc_data[vname] = _reproject_ancillary_band(
+                        arr,
+                        src_transform=warp_kw["src_transform"],
+                        src_crs=warp_kw["src_crs"],
+                        dst_transform=warp_kw["dst_transform"],
+                        dst_crs=warp_kw["dst_crs"],
+                        dst_width=warp_kw["dst_width"],
+                        dst_height=warp_kw["dst_height"],
+                        resample_name=_ancillary_warp_resampling(vname),
+                        num_threads=warp_kw.get("num_threads"),
+                    )
             elif fill_holes:
                 for bi in range(data_stack.shape[0]):
                     data_stack[bi] = _fill_nodata_nn(data_stack[bi])
