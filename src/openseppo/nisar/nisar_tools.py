@@ -18,6 +18,7 @@ dual-pol ratio computation.
 
 import sys
 import os
+import gc
 import atexit
 import tempfile
 import shutil
@@ -2018,10 +2019,14 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                 for i in range(len(bands_data)):
                     if not _is_ancillary(_read_vars[i]):
                         bands_data[i] = bands_data[i] * _sigma_data
+                del _sigma_data
+                gc.collect()
                 if verbose:
                     print(f"    Applied rtcGammaToSigmaFactor (gamma0 -> sigma0)", flush=True)
 
             data_stack = np.stack(bands_data)
+            del bands_data
+            gc.collect()
             if verbose:
                 shape = data_stack.shape
                 mb = data_stack.nbytes / 1e6
