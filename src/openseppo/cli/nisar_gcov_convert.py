@@ -479,7 +479,7 @@ def _print_vrt_summary(output_path, summary):
         def key(p):
             return p
 
-    for section, label in [("backscatter", "Backscatter"), ("ancillary", "Ancillary")]:
+    for section, label in [("ancillary", "Ancillary"), ("backscatter", "Backscatter")]:
         data = summary.get(section, {})
         singles = data.get("single_dates", [])
         mosaics = data.get("mosaics", [])
@@ -498,6 +498,14 @@ def _print_vrt_summary(output_path, summary):
             print(f"\n{_green(f'---> {label} combined time series:')}")
             for p in sorted(combined):
                 print(key(p))
+
+    # Repeat path/bucket at the end for easier pasting
+    if is_s3:
+        print(f"\n{_green('---> Bucket:')}")
+        print(bucket)
+    else:
+        print(f"\n{_green('---> Path:')}")
+        print(output_path.rstrip("/"))
 
 
 def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_auth=None):
@@ -639,8 +647,11 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
                               "transform": m["transform"], "w": m["w"], "h": m["h"],
                               "nodata": m.get("nodata")}
                         ts_items.append(ti)
+                        # Track TIF for potential multi-pol VRT (backscatter)
                         if category == "backscatter":
                             date_pol_sources[(m["nisar_base"], ti["date"])].append((m["path"], pol_str))
+                        # Add raw TIF to single_dates (replaced by VRT in Phase 2 if applicable)
+                        summary[category]["single_dates"].append(m["path"])
 
                     track_dir_ts[(track, direction)] = {"ts_items": ts_items, "metas": td_metas}
 
@@ -716,6 +727,16 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
                         vrt_xml = nisar_tools.generate_vrt_xml_single_step(
                             w, h, tf, crs_w, band_files, band_names, date, dtype=dt)
                         write_vrt(vrt_path, vrt_xml)
+                        # Replace individual pol TIFs/VRTs with the multi-pol VRT
+                        covered = set(band_files)
+                        summary["backscatter"]["single_dates"] = [
+                            p for p in summary["backscatter"]["single_dates"]
+                            if p not in covered
+                        ]
+                        summary["backscatter"]["mosaics"] = [
+                            p for p in summary["backscatter"]["mosaics"]
+                            if p not in covered
+                        ]
                         summary["backscatter"]["single_dates"].append(vrt_path)
 
     _print_vrt_summary(output_path, summary)
