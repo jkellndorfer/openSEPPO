@@ -573,20 +573,36 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
             parsed.append((fpath, meta))
 
     # Read TIF geo + tags in parallel (ThreadPool for local I/O, also safe for S3)
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    # Read geo+tags from one TIF per (track, direction) group and apply to all.
+    # All TIFs in a group share the same CRS/transform/dimensions from the same
+    # source H5 + processing parameters.  Avoids N rasterio opens on S3.
+    _td_groups = defaultdict(list)
+    for fpath, meta in parsed:
+        _td_groups[(meta["track"], meta["direction"])].append((fpath, meta))
+
+    _geo_cache = {}  # (track, direction) -> geo dict
+    for (trk, dir_), group in _td_groups.items():
+        # Read geo from the first backscatter TIF (has tags like RADIOMETRY);
+        # fall back to first ancillary if no backscatter in group.
+        _sample = next((fp for fp, m in group if not m["is_ancillary"]),
+                       group[0][0])
+        geo = _read_tif_geo(_sample, output_fs)
+        if geo is not None:
+            _geo_cache[(trk, dir_)] = geo
 
     all_metas = []
-    _n_workers = min(len(parsed), 48)
-    with ThreadPoolExecutor(max_workers=_n_workers) as pool:
-        futures = {pool.submit(_read_tif_geo, fpath, output_fs): meta
-                   for fpath, meta in parsed}
-        for future in as_completed(futures):
-            meta = futures[future]
-            geo = future.result()
-            if geo is None:
-                continue
-            meta.update(geo)
-            all_metas.append(meta)
+    for fpath, meta in parsed:
+        geo = _geo_cache.get((meta["track"], meta["direction"]))
+        if geo is None:
+            continue
+        # Copy shared geo but keep per-file nodata from the ancillary table
+        _file_geo = dict(geo)
+        if meta["is_ancillary"]:
+            from openseppo.nisar.nisar_tools import _ancillary_nodata, _ancillary_out_dtype
+            _file_geo["nodata"] = _ancillary_nodata(meta["pol_str"])
+            _file_geo["dtype"] = _ancillary_out_dtype(meta["pol_str"])
+        meta.update(_file_geo)
+        all_metas.append(meta)
 
     bsc_metas = [m for m in all_metas if not m["is_ancillary"]]
     anc_metas = [m for m in all_metas if m["is_ancillary"]]
