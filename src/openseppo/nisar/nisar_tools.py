@@ -1421,8 +1421,13 @@ def inspect_h5_structure(f):
                     if isinstance(obj, h5py.Dataset) and len(obj.shape) >= 2:
                         variables.append(item)
                         _dt = str(obj.dtype)
-                        _fv = obj.fillvalue
-                        _fv_str = str(_fv) if _fv is not None else "none"
+                        # Prefer explicit _FillValue attribute over h5py's
+                        # .fillvalue (which returns the HDF5 dtype default).
+                        if "_FillValue" in obj.attrs:
+                            _fv = obj.attrs["_FillValue"]
+                            _fv_str = str(_fv)
+                        else:
+                            _fv_str = "none"
                         var_details[item] = {"dtype": _dt, "nodata": _fv_str}
 
             structure[freq_code] = {"crs": crs, "ncols": ncols, "nrows": nrows, "res_x": float(res_x), "res_y": float(res_y), "bbox": (min_x, min_y, max_x, max_y), "vars": sorted(variables), "var_details": var_details, "poly_geo": poly_geo_display, "poly_native": poly_native_display, "dims": dims_km}
