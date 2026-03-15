@@ -260,14 +260,20 @@ def _list_all_nisar_tifs(output_path, frequency, mode_str, output_fs=None):
 
 
 def _read_tif_geo(tif_path, output_fs=None):
-    """Return (transform, w, h, crs_wkt, dtype, nodata) from a TIF file, or None on error."""
+    """Return dict with geo info and GDAL tags from a TIF, or None on error."""
     try:
         if output_fs:
             with output_fs.open(tif_path, "rb") as fobj:
                 with rasterio.open(fobj) as ds:
-                    return ds.transform, ds.width, ds.height, ds.crs.to_wkt(), ds.dtypes[0], ds.nodata
+                    tags = ds.tags()
+                    return {"transform": ds.transform, "w": ds.width, "h": ds.height,
+                            "crs_wkt": ds.crs.to_wkt(), "dtype": ds.dtypes[0],
+                            "nodata": ds.nodata, "tags": tags}
         with rasterio.open(tif_path) as ds:
-            return ds.transform, ds.width, ds.height, ds.crs.to_wkt(), ds.dtypes[0], ds.nodata
+            tags = ds.tags()
+            return {"transform": ds.transform, "w": ds.width, "h": ds.height,
+                    "crs_wkt": ds.crs.to_wkt(), "dtype": ds.dtypes[0],
+                    "nodata": ds.nodata, "tags": tags}
     except Exception:
         return None
 
@@ -297,7 +303,7 @@ def _gdal_nodata_str(nodata, dtype):
     return "0" if ("int" in d or "byte" in d) else "nan"
 
 
-def _generate_mosaic_vrt_xml(frame_items, crs_wkt, dtype):
+def _generate_mosaic_vrt_xml(frame_items, crs_wkt, dtype, metadata=None):
     """
     Spatial mosaic VRT: all frame_items (different extents, same date) are merged
     into a single band. Returns (xml_str, union_transform, union_w, union_h).
@@ -322,6 +328,10 @@ def _generate_mosaic_vrt_xml(frame_items, crs_wkt, dtype):
         f'<VRTDataset rasterXSize="{union_w}" rasterYSize="{union_h}">',
         f'  <SRS dataAxisToSRSAxisMapping="1,2">{crs_wkt}</SRS>',
         f"  <GeoTransform>{geo}</GeoTransform>",
+    ]
+    if metadata:
+        lines.append(nisar_tools._vrt_metadata_xml(metadata))
+    lines += [
         f'  <VRTRasterBand dataType="{vrt_dtype}" band="1">',
         f"    <NoDataValue>{nodata_val}</NoDataValue>",
         f"    <ColorInterp>Gray</ColorInterp>",
@@ -424,14 +434,13 @@ def _track_vrt_filename(metas, pol_str, mode_str):
             f"{ebd}")
 
 
-def _make_ts_vrt(ts_items, crs_wkt, dtype, nodata=None):
+def _make_ts_vrt(ts_items, crs_wkt, dtype, nodata=None, metadata=None):
     """Choose between same-extent and union time-series VRT builder."""
-    # Derive nodata from the first item if not explicitly given
     if nodata is None:
         nodata = ts_items[0].get("nodata")
     same_geo = all(it["w"] == ts_items[0]["w"] and it["h"] == ts_items[0]["h"] and it["transform"] == ts_items[0]["transform"] for it in ts_items)
     if same_geo:
-        return nisar_tools.generate_vrt_xml_timeseries(ts_items[0]["w"], ts_items[0]["h"], ts_items[0]["transform"], crs_wkt, ts_items, dtype=dtype, nodata=nodata)
+        return nisar_tools.generate_vrt_xml_timeseries(ts_items[0]["w"], ts_items[0]["h"], ts_items[0]["transform"], crs_wkt, ts_items, dtype=dtype, nodata=nodata, metadata=metadata)
     return _generate_ts_union_vrt_xml(crs_wkt, ts_items, dtype)
 
 
@@ -545,20 +554,48 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
 
     # --- Collect all TIFs (backscatter + ancillary) and parse metadata ---
     tif_files = _list_all_nisar_tifs(output_path, frequency, mode_str, output_fs)
-    all_metas = []
+    # Parse filenames (fast, no I/O)
+    parsed = []
     for fpath in tif_files:
         meta = _parse_nisar_tif_meta(fpath)
-        if meta is None:
-            continue
+        if meta is not None:
+            parsed.append((fpath, meta))
+
+    # Read TIF geo + tags in parallel (ThreadPool for local I/O, also safe for S3)
+    from concurrent.futures import ThreadPoolExecutor
+    def _read_one(args):
+        fpath, meta = args
         geo = _read_tif_geo(fpath, output_fs)
-        if geo is None:
-            continue
-        tf, w, h, crs_wkt, dtype, nodata = geo
-        meta.update({"transform": tf, "w": w, "h": h, "crs_wkt": crs_wkt, "dtype": dtype, "nodata": nodata})
-        all_metas.append(meta)
+        return (meta, geo)
+
+    all_metas = []
+    with ThreadPoolExecutor(max_workers=min(len(parsed), os.cpu_count() or 4, 16)) as pool:
+        for meta, geo in pool.map(_read_one, parsed):
+            if geo is None:
+                continue
+            meta.update(geo)  # merges transform, w, h, crs_wkt, dtype, nodata, tags
+            all_metas.append(meta)
 
     bsc_metas = [m for m in all_metas if not m["is_ancillary"]]
     anc_metas = [m for m in all_metas if m["is_ancillary"]]
+
+    # Check for mixed radiometry -- refuse to build VRTs if inconsistent
+    _radiometries = {m["tags"].get("RADIOMETRY") for m in bsc_metas if m.get("tags")}
+    _radiometries.discard(None)
+    if len(_radiometries) > 1:
+        print(f"  WARNING: mixed radiometry found ({_radiometries}). "
+              f"Cannot build VRTs from inconsistent data. "
+              f"Reprocess with a single radiometry setting.", file=sys.stderr)
+        _print_vrt_summary(output_path, summary={"backscatter": {}, "ancillary": {}})
+        return
+
+    # Extract VRT-level metadata from the first backscatter TIF's tags
+    _vrt_meta = {}
+    if bsc_metas:
+        _src_tags = bsc_metas[0].get("tags", {})
+        for _k in ("RADIOMETRY", "DB_FORMULA", "OPENSEPPO_VERSION", "CRID", "ISCE3_VERSION"):
+            if _k in _src_tags:
+                _vrt_meta[_k] = _src_tags[_k]
 
     if verbose and all_metas:
         print(f"  build_track_vrts: {len(bsc_metas)} backscatter + {len(anc_metas)} ancillary TIFs "
@@ -608,7 +645,8 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
                     mosaic_items = []
                     for cycle, cyc_metas in sorted(by_cycle.items()):
                         frame_items = sorted(cyc_metas, key=lambda x: x["frame"])
-                        mosaic_xml, union_tf, union_w, union_h = _generate_mosaic_vrt_xml(frame_items, crs_wkt, dtype)
+                        _mosaic_meta = _vrt_meta if category == "backscatter" else None
+                        mosaic_xml, union_tf, union_w, union_h = _generate_mosaic_vrt_xml(frame_items, crs_wkt, dtype, metadata=_mosaic_meta)
                         m0 = frame_items[0]
                         min_fr = min(m["frame"] for m in frame_items)
                         max_fr = max(m["frame"] for m in frame_items)
@@ -660,7 +698,8 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
                 ts_items = info["ts_items"]
                 td_metas = info["metas"]
                 if len(ts_items) > 1:
-                    ts_xml = _make_ts_vrt(ts_items, crs_wkt, dtype)
+                    _ts_meta = _vrt_meta if category == "backscatter" else None
+                    ts_xml = _make_ts_vrt(ts_items, crs_wkt, dtype, metadata=_ts_meta)
                     ts_name = _track_vrt_filename(td_metas, pol_str, _ms)
                     ts_path = f"{out_dir}/{ts_name}"
                     write_vrt(ts_path, ts_xml)
@@ -676,7 +715,8 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
                 )
                 if len(combined_items) > 1:
                     combined_metas = [m for info in track_dir_ts.values() for m in info["metas"]]
-                    combined_xml = _make_ts_vrt(combined_items, crs_wkt, dtype)
+                    _c_meta = _vrt_meta if category == "backscatter" else None
+                    combined_xml = _make_ts_vrt(combined_items, crs_wkt, dtype, metadata=_c_meta)
                     combined_name = _track_vrt_filename(combined_metas, pol_str, _ms)
                     combined_path = f"{out_dir}/{combined_name}"
                     write_vrt(combined_path, combined_xml)
@@ -717,7 +757,7 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
                     band_names = [ps for _, ps in unique]
                     ref_geo = _read_tif_geo(band_files[0], output_fs)
                     if ref_geo:
-                        tf, w, h, crs_w, dt, _nd = ref_geo
+                        tf, w, h, crs_w, dt = ref_geo["transform"], ref_geo["w"], ref_geo["h"], ref_geo["crs_wkt"], ref_geo["dtype"]
                         pol_list_str = "".join(band_names)
                         ebd = f"-EBD_{frequency}_{pol_list_str}_{mode_str}.vrt"
                         # Derive VRT name from the first source file

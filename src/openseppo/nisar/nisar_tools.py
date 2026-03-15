@@ -614,18 +614,7 @@ def _vrt_metadata_xml(metadata, indent="  "):
 
 def generate_vrt_xml_single_step(width, height, transform, crs_wkt, band_files, band_names, date_str, dtype="UInt16", nodata=None, metadata=None):
     vrt_dtype = get_gdal_dtype(dtype)
-
-    # --- 1. Determine NoData Value ---
-    if nodata is not None:
-        nodata_val = str(nodata)
-    else:
-        # Heuristic: Integers use 0, Floats use nan
-        # Check against the input dtype string (e.g., 'uint16', 'float32', 'Byte')
-        d_str = str(dtype).lower()
-        if "int" in d_str or "byte" in d_str:
-            nodata_val = "0"
-        else:
-            nodata_val = "nan"
+    nodata_val = _format_nodata_val(nodata, dtype)
 
     geo_transform = f"{transform.c}, {transform.a}, {transform.b}, {transform.f}, {transform.d}, {transform.e}"
     xml = [f'<VRTDataset rasterXSize="{width}" rasterYSize="{height}">', f'  <SRS dataAxisToSRSAxisMapping="1,2">{crs_wkt}</SRS>', f"  <GeoTransform>{geo_transform}</GeoTransform>"]
@@ -657,24 +646,30 @@ def generate_vrt_xml_single_step(width, height, transform, crs_wkt, band_files, 
     return "\n".join(xml)
 
 
-def generate_vrt_xml_timeseries(width, height, transform, crs_wkt, stack_items, dtype="UInt16", nodata=None):
-    vrt_dtype = get_gdal_dtype(dtype)
-
-    # --- 1. Determine NoData Value ---
+def _format_nodata_val(nodata, dtype):
+    """Format nodata for VRT XML: int when possible, 'nan' for NaN, heuristic fallback."""
     if nodata is not None:
-        nodata_val = str(nodata)
-    else:
-        # Heuristic: Integers use 0, Floats use nan
-        # Check against the input dtype string (e.g., 'uint16', 'float32', 'Byte')
-        d_str = str(dtype).lower()
-        if "int" in d_str or "byte" in d_str:
-            nodata_val = "0"
-        else:
-            nodata_val = "nan"
+        try:
+            import math
+            if math.isnan(nodata):
+                return "nan"
+        except (TypeError, ValueError):
+            pass
+        return str(int(nodata)) if nodata == int(nodata) else str(nodata)
+    d_str = str(dtype).lower()
+    return "0" if ("int" in d_str or "byte" in d_str) else "nan"
+
+
+def generate_vrt_xml_timeseries(width, height, transform, crs_wkt, stack_items, dtype="UInt16", nodata=None, metadata=None):
+    vrt_dtype = get_gdal_dtype(dtype)
+    nodata_val = _format_nodata_val(nodata, dtype)
 
     geo_transform = f"{transform.c}, {transform.a}, {transform.b}, {transform.f}, {transform.d}, {transform.e}"
 
     xml = [f'<VRTDataset rasterXSize="{width}" rasterYSize="{height}">', f'  <SRS dataAxisToSRSAxisMapping="1,2">{crs_wkt}</SRS>', f"  <GeoTransform>{geo_transform}</GeoTransform>"]
+    ds_meta = _vrt_metadata_xml(metadata)
+    if ds_meta:
+        xml.append(ds_meta)
 
     for i, item in enumerate(stack_items):
         fpath = item["path"]
@@ -711,11 +706,7 @@ def generate_vrt_xml_timeseries_union(crs_wkt, stack_items, dtype="Float32", nod
     All items must share the same CRS and pixel size.
     """
     vrt_dtype = get_gdal_dtype(dtype)
-    if nodata is not None:
-        nodata_val = str(nodata)
-    else:
-        d_str = str(dtype).lower()
-        nodata_val = "0" if ("int" in d_str or "byte" in d_str) else "nan"
+    nodata_val = _format_nodata_val(nodata, dtype)
 
     res_x = abs(stack_items[0]["transform"].a)
     res_y = abs(stack_items[0]["transform"].e)
@@ -1471,8 +1462,14 @@ def get_grid_info_from_datatree(dt, frequency="A"):
 
 
 def _decode_h5_scalar(val):
-    """Decode an HDF5 scalar to a Python str."""
-    if hasattr(val, "decode"):
+    """Decode an HDF5 / xarray scalar to a clean Python str.
+
+    Handles np.bytes_, bytes, numpy 0-d arrays, and plain strings.
+    """
+    # Unwrap 0-d numpy arrays (from xarray .values on scalar datasets)
+    if isinstance(val, np.ndarray) and val.ndim == 0:
+        val = val.item()
+    if isinstance(val, (bytes, np.bytes_)):
         return val.decode()
     return str(val)
 
