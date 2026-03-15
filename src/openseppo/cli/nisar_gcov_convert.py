@@ -197,7 +197,9 @@ def _parse_nisar_tif_meta(tif_path):
     if "-EBD_" not in basename:
         return None
     nisar_base, ebd_raw = basename.split("-EBD_", 1)
-    ebd_raw = ebd_raw.removesuffix(".tif").removesuffix(".vrt")
+    if not basename.endswith(".tif"):
+        return None
+    ebd_raw = ebd_raw.removesuffix(".tif")
     ebd_tokens = ebd_raw.split("_")  # ["A", "hh", "AMP"] or ["A", "mask"]
     if len(ebd_tokens) < 2:
         return None
@@ -679,7 +681,7 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
                               "nodata": m0.get("nodata")}
                         mosaic_items.append(mi)
                         if category == "backscatter":
-                            date_pol_sources[(m0["nisar_base"], mi["date"])].append((mosaic_path, pol_str))
+                            date_pol_sources[(m0["nisar_base"], mi["date"])].append((mosaic_path, pol_str, _ms))
 
                     track_dir_ts[(track, direction)] = {"ts_items": mosaic_items, "metas": td_metas}
 
@@ -696,7 +698,7 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
                         ts_items.append(ti)
                         # Track TIF for potential multi-pol VRT (backscatter)
                         if category == "backscatter":
-                            date_pol_sources[(m["nisar_base"], ti["date"])].append((m["path"], pol_str))
+                            date_pol_sources[(m["nisar_base"], ti["date"])].append((m["path"], pol_str, _ms))
                         # Add raw TIF to single_dates (replaced by VRT in Phase 2 if applicable)
                         summary[category]["single_dates"].append(m["path"])
 
@@ -752,18 +754,19 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
                 # Deduplicate and sort by pol_str
                 seen = set()
                 unique = []
-                for path, pstr in pol_paths:
+                for path, pstr, ms in pol_paths:
                     if path not in seen:
                         seen.add(path)
-                        unique.append((path, pstr))
+                        unique.append((path, pstr, ms))
                 # Only build multi-pol VRT when >1 polarization
                 if len(unique) > 1:
                     # Band order: likepol (hh/vv), crosspol (hv/vh), ratio last
                     _pol_order = {"hh": 0, "vv": 0, "hv": 1, "vh": 1,
                                   "hhhvra": 2, "vvvhra": 2}
                     unique.sort(key=lambda x: (_pol_order.get(x[1], 1), x[1]))
-                    band_files = [p for p, _ in unique]
-                    band_names = [ps for _, ps in unique]
+                    band_files = [p for p, _, _ in unique]
+                    band_names = [ps for _, ps, _ in unique]
+                    _tif_ms = unique[0][2]  # mode_str from TIF metadata
                     ref_geo = _read_tif_geo(band_files[0], output_fs)
                     if ref_geo:
                         tf = ref_geo["transform"]
@@ -771,7 +774,7 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
                         crs_w, dt = ref_geo["crs_wkt"], ref_geo["dtype"]
                         nd = ref_geo["nodata"]
                         pol_list_str = "".join(band_names)
-                        ebd = f"-EBD_{frequency}_{pol_list_str}_{mode_str}.vrt"
+                        ebd = f"-EBD_{frequency}_{pol_list_str}_{_tif_ms}.vrt"
                         src_base = os.path.basename(band_files[0])
                         if "-EBD_" in src_base:
                             vrt_name = src_base.split("-EBD_")[0] + ebd
