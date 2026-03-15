@@ -675,7 +675,6 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
         date_pol_sources = defaultdict(list)
 
         for pol_str, pol_metas in sorted(by_pol.items()):
-            crs_wkt = pol_metas[0]["crs_wkt"]
             dtype = pol_metas[0]["dtype"]
             _ms = pol_metas[0]["mode_str"]  # None for ancillary
 
@@ -687,6 +686,7 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
             track_dir_ts = {}
 
             for (track, direction), td_metas in sorted(by_td.items()):
+                _td_crs = td_metas[0]["crs_wkt"]  # per-track CRS
                 frames = sorted({m["frame"] for m in td_metas})
 
                 # --- Phase 1: Grid mosaic VRTs ---
@@ -699,7 +699,7 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
                     for cycle, cyc_metas in sorted(by_cycle.items()):
                         frame_items = sorted(cyc_metas, key=lambda x: x["frame"])
                         _mosaic_meta = _vrt_meta if category == "backscatter" else None
-                        mosaic_xml, union_tf, union_w, union_h = _generate_mosaic_vrt_xml(frame_items, crs_wkt, dtype, metadata=_mosaic_meta)
+                        mosaic_xml, union_tf, union_w, union_h = _generate_mosaic_vrt_xml(frame_items, _td_crs, dtype, metadata=_mosaic_meta)
                         m0 = frame_items[0]
                         min_fr = min(m["frame"] for m in frame_items)
                         max_fr = max(m["frame"] for m in frame_items)
@@ -750,9 +750,10 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
             for (track, direction), info in sorted(track_dir_ts.items()):
                 ts_items = info["ts_items"]
                 td_metas = info["metas"]
+                _td_crs = td_metas[0]["crs_wkt"]
                 if len(ts_items) > 1:
                     _ts_meta = _vrt_meta if category == "backscatter" else None
-                    ts_xml = _make_ts_vrt(ts_items, crs_wkt, dtype, metadata=_ts_meta)
+                    ts_xml = _make_ts_vrt(ts_items, _td_crs, dtype, metadata=_ts_meta)
                     ts_name = _track_vrt_filename(td_metas, pol_str, _ms)
                     ts_path = f"{out_dir}/{ts_name}"
                     write_vrt(ts_path, ts_xml)
@@ -760,8 +761,10 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
                     if verbose:
                         print(f"    TS VRT: {ts_name}")
 
-            # --- Phase 4: Combined multi-track VRT ---
-            if len(track_dir_ts) > 1:
+            # --- Phase 4: Combined multi-track VRT (only when all tracks share the same CRS) ---
+            _all_crs = {info["metas"][0]["crs_wkt"] for info in track_dir_ts.values()}
+            if len(track_dir_ts) > 1 and len(_all_crs) == 1:
+                _combined_crs = _all_crs.pop()
                 combined_items = sorted(
                     [item for info in track_dir_ts.values() for item in info["ts_items"]],
                     key=lambda x: x["date"],
@@ -769,7 +772,7 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
                 if len(combined_items) > 1:
                     combined_metas = [m for info in track_dir_ts.values() for m in info["metas"]]
                     _c_meta = _vrt_meta if category == "backscatter" else None
-                    combined_xml = _make_ts_vrt(combined_items, crs_wkt, dtype, metadata=_c_meta)
+                    combined_xml = _make_ts_vrt(combined_items, _combined_crs, dtype, metadata=_c_meta)
                     combined_name = _track_vrt_filename(combined_metas, pol_str, _ms)
                     combined_path = f"{out_dir}/{combined_name}"
                     write_vrt(combined_path, combined_xml)
