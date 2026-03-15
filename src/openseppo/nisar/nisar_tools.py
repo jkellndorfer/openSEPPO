@@ -1949,7 +1949,8 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
         # requested so it is fetched in the same parallel I/O pass (same
         # spatial subset) as the covariance bands.
         _sigma_var = "rtcGammaToSigmaFactor"
-        _read_vars = list(variable_names) + ([_sigma_var] if sigma0 else [])
+        _sigma_already_in_vars = _sigma_var in variable_names
+        _read_vars = list(variable_names) + ([_sigma_var] if sigma0 and not _sigma_already_in_vars else [])
 
         if use_low_memory_mode:
             if verbose:
@@ -1997,11 +1998,18 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
             # to avoid dtype promotion of the whole stack to complex.
             bands_data = [np.abs(b).astype(np.float32) if np.iscomplexobj(b) else b for b in bands_data]
 
-            # Extract and apply the sigma0 conversion factor before stacking
+            # Extract and apply the sigma0 conversion factor before stacking.
+            # If the user included rtcGammaToSigmaFactor in --vars it stays in
+            # bands_data for output; if we appended it just for the conversion
+            # we remove it so it doesn't become an extra output band.
             if sigma0:
-                _sigma_data = bands_data.pop()  # last element is rtcGammaToSigmaFactor
+                if _sigma_already_in_vars:
+                    _sigma_data = bands_data[list(variable_names).index(_sigma_var)]
+                else:
+                    _sigma_data = bands_data.pop()
                 for i in range(len(bands_data)):
-                    bands_data[i] = bands_data[i] * _sigma_data
+                    if not _is_ancillary(_read_vars[i]):
+                        bands_data[i] = bands_data[i] * _sigma_data
                 if verbose:
                     print(f"    Applied rtcGammaToSigmaFactor (gamma0 -> sigma0)", flush=True)
 

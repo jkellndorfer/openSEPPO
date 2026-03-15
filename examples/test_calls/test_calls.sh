@@ -1,0 +1,1 @@
+seppo_nisar_gcov_convert -sigma0 -dpratio -amp -t_srs 4326 -tr 0.0002 0.0002 --vars HHHH HVHV mask numberOfLooks rtcGammaToSigmaFactor -v -o s3://seppo1-data/NISAR/test/openseppo_full_mosaic_AD  -i t84-105-f72-73-17-18_urls.txt
