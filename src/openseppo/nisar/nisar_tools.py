@@ -2312,25 +2312,36 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
             # -- Reproject / resample --
             if needs_reproject and warp_kw is not None:
                 if verbose:
-                    print(f"    Reprojecting {len(variable_names)} bands...", flush=True)
-                if data_stack.shape[0] > 0:
-                    n_bsc = data_stack.shape[0]
-                    warped = np.full((n_bsc, warp_kw["dst_height"], warp_kw["dst_width"]), np.nan, dtype=np.float32)
-                    for bi in range(n_bsc):
-                        warped[bi] = _reproject_power_band(data_stack[bi], **warp_kw)
-                    data_stack = warped
-                for vname, arr in _anc_data.items():
-                    _anc_data[vname] = _reproject_ancillary_band(
-                        arr,
-                        src_transform=warp_kw["src_transform"],
-                        src_crs=warp_kw["src_crs"],
-                        dst_transform=warp_kw["dst_transform"],
-                        dst_crs=warp_kw["dst_crs"],
-                        dst_width=warp_kw["dst_width"],
-                        dst_height=warp_kw["dst_height"],
-                        resample_name=_ancillary_warp_resampling(vname),
-                        num_threads=warp_kw.get("num_threads"),
-                    )
+                    _n_bsc = data_stack.shape[0]
+                    _n_anc = len(_anc_data)
+                    _est_gb = (_n_bsc * 2 + _n_anc) * warp_kw["dst_height"] * warp_kw["dst_width"] * 4 / 1e9
+                    print(f"    Reprojecting {_n_bsc} backscatter + {_n_anc} ancillary bands (~{_est_gb:.1f} GB)...", flush=True)
+                try:
+                    if data_stack.shape[0] > 0:
+                        n_bsc = data_stack.shape[0]
+                        warped = np.full((n_bsc, warp_kw["dst_height"], warp_kw["dst_width"]), np.nan, dtype=np.float32)
+                        for bi in range(n_bsc):
+                            warped[bi] = _reproject_power_band(data_stack[bi], **warp_kw)
+                        data_stack = warped
+                    for vname, arr in _anc_data.items():
+                        _anc_data[vname] = _reproject_ancillary_band(
+                            arr,
+                            src_transform=warp_kw["src_transform"],
+                            src_crs=warp_kw["src_crs"],
+                            dst_transform=warp_kw["dst_transform"],
+                            dst_crs=warp_kw["dst_crs"],
+                            dst_width=warp_kw["dst_width"],
+                            dst_height=warp_kw["dst_height"],
+                            resample_name=_ancillary_warp_resampling(vname),
+                            num_threads=warp_kw.get("num_threads"),
+                        )
+                except MemoryError:
+                    print(f"!!! Out of memory reprojecting {h5_basename}. "
+                          f"Try adding -d 2 (or higher) to downscale first, "
+                          f"or use -projwin/-srcwin to process a smaller area, "
+                          f"or process backscatter and ancillary in separate runs.",
+                          file=sys.stderr, flush=True)
+                    raise
             elif fill_holes:
                 for bi in range(data_stack.shape[0]):
                     data_stack[bi] = _fill_nodata_nn(data_stack[bi])
