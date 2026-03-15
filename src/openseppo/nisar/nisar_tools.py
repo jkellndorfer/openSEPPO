@@ -532,7 +532,18 @@ def get_gdal_dtype(numpy_dtype):
     return "Float32"
 
 
-def generate_vrt_xml_single_step(width, height, transform, crs_wkt, band_files, band_names, date_str, dtype="UInt16", nodata=None):
+def _vrt_metadata_xml(metadata, indent="  "):
+    """Build a <Metadata> block from a dict of key/value pairs."""
+    if not metadata:
+        return ""
+    lines = [f"{indent}<Metadata>"]
+    for k, v in metadata.items():
+        lines.append(f'{indent}  <MDI key="{k}">{v}</MDI>')
+    lines.append(f"{indent}</Metadata>")
+    return "\n".join(lines)
+
+
+def generate_vrt_xml_single_step(width, height, transform, crs_wkt, band_files, band_names, date_str, dtype="UInt16", nodata=None, metadata=None):
     vrt_dtype = get_gdal_dtype(dtype)
 
     # --- 1. Determine NoData Value ---
@@ -549,6 +560,9 @@ def generate_vrt_xml_single_step(width, height, transform, crs_wkt, band_files, 
 
     geo_transform = f"{transform.c}, {transform.a}, {transform.b}, {transform.f}, {transform.d}, {transform.e}"
     xml = [f'<VRTDataset rasterXSize="{width}" rasterYSize="{height}">', f'  <SRS dataAxisToSRSAxisMapping="1,2">{crs_wkt}</SRS>', f"  <GeoTransform>{geo_transform}</GeoTransform>"]
+    ds_meta = _vrt_metadata_xml(metadata)
+    if ds_meta:
+        xml.append(ds_meta)
     for i, (fpath, bname) in enumerate(zip(band_files, band_names)):
         if fpath.startswith("s3://"):
             bucket, key = fpath.replace("s3://", "").split("/", 1)
@@ -1375,29 +1389,69 @@ def get_grid_info_from_datatree(dt, frequency="A"):
         return None
 
 
+def _decode_h5_scalar(val):
+    """Decode an HDF5 scalar to a Python str."""
+    if hasattr(val, "decode"):
+        return val.decode()
+    return str(val)
+
+
 def get_acquisition_metadata_from_datatree(dt):
     """Read acquisition metadata from an open datatree, avoiding a second S3 file open."""
     try:
         node = dt["science/LSAR/identification"]
         ds = node.ds
-        t_start = ds["zeroDopplerStartTime"].values
-        t_start = t_start.decode() if hasattr(t_start, "decode") else str(t_start)
+        t_start = _decode_h5_scalar(ds["zeroDopplerStartTime"].values)
+        meta = {}
         if "T" in t_start:
             date_part, time_part = t_start.split("T")
-            return {"ACQUISITION_DATE": date_part, "ACQUISITION_TIME": time_part}
-        return {"ACQUISITION_DATETIME": t_start}
+            meta["ACQUISITION_DATE"] = date_part
+            meta["ACQUISITION_TIME"] = time_part
+        else:
+            meta["ACQUISITION_DATETIME"] = t_start
+        # CRID
+        try:
+            meta["CRID"] = _decode_h5_scalar(ds["compositeReleaseID"].values)
+        except Exception:
+            pass
+        # ISCE3 / software version
+        try:
+            sw = dt["science/LSAR/GCOV/metadata/processingInformation/algorithms"].ds
+            meta["ISCE3_VERSION"] = _decode_h5_scalar(sw["softwareVersion"].values)
+        except Exception:
+            pass
+        return meta
     except Exception:
         return None
 
 
 def get_acquisition_metadata(h5_handle):
     try:
-        t_start = h5_handle["/science/LSAR/identification/zeroDopplerStartTime"][()]
-        t_start = t_start.decode() if hasattr(t_start, "decode") else str(t_start)
+        t_start = _decode_h5_scalar(
+            h5_handle["/science/LSAR/identification/zeroDopplerStartTime"][()]
+        )
+        meta = {}
         if "T" in t_start:
             date_part, time_part = t_start.split("T")
-            return {"ACQUISITION_DATE": date_part, "ACQUISITION_TIME": time_part}
-        return {"ACQUISITION_DATETIME": t_start}
+            meta["ACQUISITION_DATE"] = date_part
+            meta["ACQUISITION_TIME"] = time_part
+        else:
+            meta["ACQUISITION_DATETIME"] = t_start
+        # CRID
+        try:
+            meta["CRID"] = _decode_h5_scalar(
+                h5_handle["/science/LSAR/identification/compositeReleaseID"][()]
+            )
+        except Exception:
+            pass
+        # ISCE3 / software version
+        try:
+            meta["ISCE3_VERSION"] = _decode_h5_scalar(
+                h5_handle["/science/LSAR/GCOV/metadata/processingInformation/algorithms/softwareVersion"][()]
+            )
+        except Exception:
+            pass
+        return meta
     except Exception:
         return {}
 
@@ -1561,6 +1615,14 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
             info = get_grid_info(f, frequency=frequency)
         if acq_meta is None:
             acq_meta = get_acquisition_metadata(f)
+
+        # Inject processing metadata into the tag dict
+        acq_meta["RADIOMETRY"] = "sigma0" if sigma0 else "gamma0"
+        try:
+            from importlib.metadata import version as _pkg_version
+            acq_meta["OPENSEPPO_VERSION"] = _pkg_version("openseppo")
+        except Exception:
+            acq_meta["OPENSEPPO_VERSION"] = "unknown"
 
         if verbose:
             print(f"    [t] file open + metadata: {_time.perf_counter()-_t_file:.1f}s", flush=True)
@@ -2050,7 +2112,7 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                     vrt_path = final_path + vrt_suffix
 
                 # Note: Pass output_dtype to ensure correct VRT Mapping (e.g. uint8 -> Byte)
-                vrt_xml = generate_vrt_xml_single_step(w_out, h_out, out_transform, out_crs, generated_files, variable_names, date_str, dtype=output_dtype)
+                vrt_xml = generate_vrt_xml_single_step(w_out, h_out, out_transform, out_crs, generated_files, variable_names, date_str, dtype=output_dtype, metadata=acq_meta)
                 if verbose:
                     print(f"    Generated Snapshot VRT: {vrt_path}", flush=True)
                 write_bytes(vrt_path, vrt_xml.encode("utf-8"))
@@ -2197,7 +2259,7 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                         vrt_path = final_path + vrt_suffix
 
                     # Note: Pass output_dtype to ensure correct VRT Mapping (e.g. uint8 -> Byte)
-                    vrt_xml = generate_vrt_xml_single_step(w_out, h_out, out_transform, out_crs, generated_files, variable_names, date_str, dtype=output_dtype)
+                    vrt_xml = generate_vrt_xml_single_step(w_out, h_out, out_transform, out_crs, generated_files, variable_names, date_str, dtype=output_dtype, metadata=acq_meta)
                     if verbose:
                         print(f"    Generated Snapshot VRT: {vrt_path}", flush=True)
                     write_bytes(vrt_path, vrt_xml.encode("utf-8"))
