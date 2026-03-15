@@ -617,7 +617,7 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
                         ebd = f"-EBD_{frequency}_{pol_str}_{_ms}.vrt" if _ms else f"-EBD_{frequency}_{pol_str}.vrt"
                         mosaic_name = (f"NISAR_{m0['il']}_{m0['pt']}_{m0['prod']}_{cycle:03d}_{track:03d}_"
                                        f"{direction}_{min_fr:03d}-{max_fr:03d}_{m0['mode']}_{m0['polarization']}_"
-                                       f"{m0['obs_mode']}_{min_st}_{max_et}_{m0['accuracy']}_{m0['crid']}"
+                                       f"{m0['obs_mode']}_{min_st}_{max_et}_{m0['crid']}_{m0['accuracy']}"
                                        f"{ebd}")
                         mosaic_path = f"{out_dir}/{mosaic_name}"
                         write_vrt(mosaic_path, mosaic_xml)
