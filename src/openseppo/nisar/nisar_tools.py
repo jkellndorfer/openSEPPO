@@ -2261,7 +2261,7 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                 _vrt_meta = dict(acq_meta, RADIOMETRY=_radiometry)
                 if _db_formula:
                     _vrt_meta["DB_FORMULA"] = _db_formula
-                vrt_xml = generate_vrt_xml_single_step(w_out, h_out, out_transform, out_crs, _bsc_files, _bsc_vars, date_str, dtype=output_dtype, metadata=_vrt_meta)
+                vrt_xml = generate_vrt_xml_single_step(w_out, h_out, out_transform, out_crs, _bsc_files, _bsc_vars, date_str, dtype=output_dtype, nodata=output_nodata, metadata=_vrt_meta)
                 if verbose:
                     print(f"    Generated Snapshot VRT: {vrt_path}", flush=True)
                 write_bytes(vrt_path, vrt_xml.encode("utf-8"))
@@ -2487,7 +2487,7 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                     _vrt_meta = dict(acq_meta, RADIOMETRY=_radiometry)
                     if _db_formula:
                         _vrt_meta["DB_FORMULA"] = _db_formula
-                    vrt_xml = generate_vrt_xml_single_step(w_out, h_out, out_transform, out_crs, _bsc_files, _bsc_vars, date_str, dtype=output_dtype, metadata=_vrt_meta)
+                    vrt_xml = generate_vrt_xml_single_step(w_out, h_out, out_transform, out_crs, _bsc_files, _bsc_vars, date_str, dtype=output_dtype, nodata=output_nodata, metadata=_vrt_meta)
                     if verbose:
                         print(f"    Generated Snapshot VRT: {vrt_path}", flush=True)
                     write_bytes(vrt_path, vrt_xml.encode("utf-8"))
