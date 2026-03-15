@@ -804,7 +804,7 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
                     band_files = [p for p, _, _ in unique]
                     band_names = [ps for _, ps, _ in unique]
                     _tif_ms = unique[0][2]  # mode_str from TIF metadata
-                    ref_geo = _read_tif_geo(band_files[0], output_fs)
+                    ref_geo = _geo_cache.get((_trk, _dir))
                     if ref_geo:
                         tf = ref_geo["transform"]
                         w, h = ref_geo["w"], ref_geo["h"]
