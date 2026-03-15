@@ -761,10 +761,12 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
                     band_names = [ps for _, ps in unique]
                     ref_geo = _read_tif_geo(band_files[0], output_fs)
                     if ref_geo:
-                        tf, w, h, crs_w, dt = ref_geo["transform"], ref_geo["w"], ref_geo["h"], ref_geo["crs_wkt"], ref_geo["dtype"]
+                        tf = ref_geo["transform"]
+                        w, h = ref_geo["w"], ref_geo["h"]
+                        crs_w, dt = ref_geo["crs_wkt"], ref_geo["dtype"]
+                        nd = ref_geo["nodata"]
                         pol_list_str = "".join(band_names)
                         ebd = f"-EBD_{frequency}_{pol_list_str}_{mode_str}.vrt"
-                        # Derive VRT name from the first source file
                         src_base = os.path.basename(band_files[0])
                         if "-EBD_" in src_base:
                             vrt_name = src_base.split("-EBD_")[0] + ebd
@@ -772,7 +774,7 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
                             vrt_name = src_base.replace(".tif", "") + ebd
                         vrt_path = f"{out_dir}/{vrt_name}"
                         vrt_xml = nisar_tools.generate_vrt_xml_single_step(
-                            w, h, tf, crs_w, band_files, band_names, date, dtype=dt, metadata=_vrt_meta)
+                            w, h, tf, crs_w, band_files, band_names, date, dtype=dt, nodata=nd, metadata=_vrt_meta)
                         write_vrt(vrt_path, vrt_xml)
                         # Replace individual pol TIFs/VRTs with the multi-pol VRT
                         covered = set(band_files)
