@@ -127,8 +127,7 @@ def myargsparse(a):
     parser.add_argument("--output_profile", type=str, help="AWS Profile specifically for writing Output COGs.")
     # --- Management Flags ---
     parser.add_argument("-ro", "--rebuild_only", action="store_true", help="Skip processing and ONLY rebuild VRTs in the output folder.")
-    parser.add_argument("-R", "--rebuild_all_vrts", action="store_true", help="After processing the new files, scan the output folder and (re)build the master VRTs to include ALL timesteps (old + new).")
-    parser.add_argument("-S", "--show_vrts", action="store_true", help="Print a summary of all VRTs in the output folder grouped by type (requires -o). No processing is performed.")
+    parser.add_argument("-S", "--show_vrts", action="store_true", help="Print a summary of all VRTs and TIFs in the output folder (requires -o). No processing is performed.")
     parser.add_argument("-cache", "--cache", default=None, action="store", help="Local path to a directory to cache files from urls first. Accepts 'y' or 'yes' to create a local temp directory (on /dev/shm or /tmp if available).")
     parser.add_argument("-keep", "--keep_cached", action="store_true", help="Use with -cache to keep to cached h5 file locally.")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output.")
@@ -233,16 +232,22 @@ def _parse_nisar_tif_meta(tif_path):
         return None
 
 
-def _list_all_nisar_tifs(output_path, frequency, mode_str, output_fs=None):
-    """List all NISAR TIF files (backscatter + ancillary) in output_path."""
+_KNOWN_BSC_MODES = ("pwr", "dB", "AMP", "DN")
+
+
+def _list_all_nisar_tifs(output_path, frequency, mode_str=None, output_fs=None):
+    """List all NISAR TIF files (backscatter + ancillary) in output_path.
+
+    If *mode_str* is None, auto-detect by scanning for all known modes.
+    """
     tag = f"-EBD_{frequency}_"
-    bsc_suffix = f"_{mode_str}.tif"
+    bsc_suffixes = [f"_{mode_str}.tif"] if mode_str else [f"_{m}.tif" for m in _KNOWN_BSC_MODES]
     anc_suffixes = tuple(f"_{s}.tif" for s in _KNOWN_ANC_SUFFIXES)
 
     def _matches(f):
         if not f.endswith(".tif") or tag not in f:
             return False
-        return f.endswith(bsc_suffix) or any(f.endswith(s) for s in anc_suffixes)
+        return any(f.endswith(s) for s in bsc_suffixes) or any(f.endswith(s) for s in anc_suffixes)
 
     if output_fs:
         bucket_path = output_path.replace("s3://", "")
@@ -251,9 +256,9 @@ def _list_all_nisar_tifs(output_path, frequency, mode_str, output_fs=None):
             return [f"s3://{f}" for f in files if _matches(f)]
         except Exception:
             return []
-    # Local: glob for backscatter (tag + * + bsc_suffix)
-    # and ancillary (tag + suffix directly -- no wildcard gap to avoid double _)
-    results = glob.glob(os.path.join(output_path, f"*{tag}*{bsc_suffix}"))
+    results = []
+    for bsuf in bsc_suffixes:
+        results.extend(glob.glob(os.path.join(output_path, f"*{tag}*{bsuf}")))
     for s in _KNOWN_ANC_SUFFIXES:
         results.extend(glob.glob(os.path.join(output_path, f"*{tag}{s}.tif")))
     return sorted(set(results))
@@ -801,7 +806,7 @@ def processing(args):
         build_track_vrts(
             output_path=args.output,
             frequency=args.freq,
-            mode_str=args.mode if args.mode else "pwr",
+            mode_str=None,  # auto-detect from existing TIFs
             verbose=False,
             output_auth=output_auth,
         )
@@ -871,17 +876,6 @@ def processing(args):
         # 5. Build per-track (and combined A+D) time-series VRTs
         if not args.no_time_series and not args.list_grids and args.output:
             print("\nBuilding per-track time series VRTs...")
-            build_track_vrts(
-                output_path=args.output,
-                frequency=args.freq,
-                mode_str=args.mode if args.mode else "pwr",
-                verbose=args.verbose,
-                output_auth=output_auth,
-            )
-
-        # 6. Conditional Rebuild (Post-Processing)
-        if args.rebuild_all_vrts:
-            print(f"\nRebuilding all VRTs in {args.output} to include all timesteps...")
             build_track_vrts(
                 output_path=args.output,
                 frequency=args.freq,
