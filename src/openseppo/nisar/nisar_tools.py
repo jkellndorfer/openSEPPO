@@ -560,7 +560,11 @@ def _downscale_block(data_3d, factor, method="mean"):
 
     with np.errstate(invalid="ignore"):
         if method == "sum":
-            return np.nansum(reshaped, axis=(2, 4)).astype(np.float32)
+            result = np.nansum(reshaped, axis=(2, 4))
+            # nansum returns 0 for all-NaN blocks; restore NaN for nodata regions
+            all_nan = np.all(np.isnan(reshaped), axis=(2, 4))
+            result[all_nan] = np.nan
+            return result.astype(np.float32)
         return np.nanmean(reshaped, axis=(2, 4)).astype(np.float32)
 
 
