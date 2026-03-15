@@ -573,19 +573,19 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
             parsed.append((fpath, meta))
 
     # Read TIF geo + tags in parallel (ThreadPool for local I/O, also safe for S3)
-    from concurrent.futures import ThreadPoolExecutor
-    def _read_one(args):
-        fpath, meta = args
-        geo = _read_tif_geo(fpath, output_fs)
-        return (meta, geo)
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     all_metas = []
     _n_workers = min(len(parsed), 48)
     with ThreadPoolExecutor(max_workers=_n_workers) as pool:
-        for meta, geo in pool.map(_read_one, parsed):
+        futures = {pool.submit(_read_tif_geo, fpath, output_fs): meta
+                   for fpath, meta in parsed}
+        for future in as_completed(futures):
+            meta = futures[future]
+            geo = future.result()
             if geo is None:
                 continue
-            meta.update(geo)  # merges transform, w, h, crs_wkt, dtype, nodata, tags
+            meta.update(geo)
             all_metas.append(meta)
 
     bsc_metas = [m for m in all_metas if not m["is_ancillary"]]
