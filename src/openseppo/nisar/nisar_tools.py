@@ -495,6 +495,87 @@ def recommend_ec2_instance(width, height, num_bands=1, downscale_factor=1):
 # =========================================================
 
 
+# -- Ancillary grid handling ---------------------------------------------------
+# Maps HDF5 variable name -> (output_suffix, downscale_method, warp_resampling).
+# Variables not in this dict are treated as backscatter (power) data.
+_ANCILLARY_GRIDS = {
+    "mask":                    ("mask",        "bitwise_or", "nearest"),
+    "numberOfLooks":           ("nlooks",      "sum",        "sum"),
+    "rtcGammaToSigmaFactor":   ("gamma2sigma", "mean",       "average"),
+}
+
+
+def _is_ancillary(var):
+    """Return True if *var* is a known ancillary grid (not backscatter)."""
+    return var in _ANCILLARY_GRIDS
+
+
+def _ancillary_suffix(var):
+    """Return the short output filename token for an ancillary grid."""
+    return _ANCILLARY_GRIDS[var][0]
+
+
+def _ancillary_downscale_method(var):
+    return _ANCILLARY_GRIDS[var][1]
+
+
+def _ancillary_warp_resampling(var):
+    return _ANCILLARY_GRIDS[var][2]
+
+
+def _downscale_block(data_3d, factor, method="mean"):
+    """Block-downscale a (1, H, W) array using the given aggregation.
+
+    Methods:
+        mean        -- nanmean  (power, gamma2sigma)
+        sum         -- nansum   (numberOfLooks)
+        bitwise_or  -- per-bit OR via vectorised reduce (mask bitmask: any flag wins)
+    """
+    _, h, w = data_3d.shape
+    new_h = h - (h % factor)
+    new_w = w - (w % factor)
+    if new_h == 0 or new_w == 0:
+        raise ValueError(f"Downscale factor {factor} larger than image ({w}x{h}).")
+    cropped = data_3d[:, :new_h, :new_w]
+    reshaped = cropped.reshape(1, new_h // factor, factor, new_w // factor, factor)
+
+    if method == "bitwise_or":
+        int_view = np.nan_to_num(reshaped, nan=0.0).astype(np.uint32)
+        result = np.bitwise_or.reduce(int_view, axis=2)
+        result = np.bitwise_or.reduce(result, axis=3)
+        return result.astype(np.float32)
+
+    with np.errstate(invalid="ignore"):
+        if method == "sum":
+            return np.nansum(reshaped, axis=(2, 4)).astype(np.float32)
+        return np.nanmean(reshaped, axis=(2, 4)).astype(np.float32)
+
+
+def _reproject_ancillary_band(data_2d, src_transform, src_crs, dst_transform,
+                               dst_crs, dst_width, dst_height, resample_name,
+                               num_threads=None):
+    """Warp one ancillary 2-D array with a single-pass reproject.
+
+    Unlike the two-pass power warp, ancillary grids use a straightforward
+    reproject: nearest for mask, sum for nlooks, average for gamma2sigma.
+    """
+    n_threads = num_threads if num_threads is not None else os.cpu_count() or 1
+    resample_enum = getattr(Resampling, resample_name, Resampling.nearest)
+
+    src = data_2d.astype(np.float32)
+    dst = np.full((dst_height, dst_width), np.nan, dtype=np.float32)
+
+    reproject(
+        source=src, destination=dst,
+        src_transform=src_transform, src_crs=src_crs,
+        dst_transform=dst_transform, dst_crs=dst_crs,
+        src_nodata=np.nan, dst_nodata=np.nan,
+        resampling=resample_enum,
+        num_threads=n_threads,
+    )
+    return dst
+
+
 def perform_downscaling(data_stack, factor):
     if factor is None or factor <= 1:
         return data_stack
@@ -1320,13 +1401,18 @@ def inspect_h5_structure(f):
                     poly_native_display = f"Reprojection Failed: {e}"
 
             variables = []
+            var_details = {}  # name -> {"dtype": str, "nodata": str}
             for item in f[g_path].keys():
                 if item not in ["projection", "xCoordinates", "yCoordinates", "listOfPolarizations", "covarianceMatrixDiagonal", "covarianceMatrixOffDiagonal"]:
                     obj = f[f"{g_path}/{item}"]
                     if isinstance(obj, h5py.Dataset) and len(obj.shape) >= 2:
                         variables.append(item)
+                        _dt = str(obj.dtype)
+                        _fv = obj.fillvalue
+                        _fv_str = str(_fv) if _fv is not None else "none"
+                        var_details[item] = {"dtype": _dt, "nodata": _fv_str}
 
-            structure[freq_code] = {"crs": crs, "ncols": ncols, "nrows": nrows, "res_x": float(res_x), "res_y": float(res_y), "bbox": (min_x, min_y, max_x, max_y), "vars": sorted(variables), "poly_geo": poly_geo_display, "poly_native": poly_native_display, "dims": dims_km}
+            structure[freq_code] = {"crs": crs, "ncols": ncols, "nrows": nrows, "res_x": float(res_x), "res_y": float(res_y), "bbox": (min_x, min_y, max_x, max_y), "vars": sorted(variables), "var_details": var_details, "poly_geo": poly_geo_display, "poly_native": poly_native_display, "dims": dims_km}
         except Exception as e:
             structure[freq_code] = {"error": str(e)}
 
@@ -2403,7 +2489,13 @@ def process_chunk_task(h5_url, variable_names, output_path, srcwin=None, projwin
                         print(f"    Footprint (Lon/Lat): {details.get('poly_geo', 'N/A')}")
                         print(f"    Footprint (Native):  {details.get('poly_native', 'N/A')}")
                         print(f"    Frame Size:          {details.get('dims', 'N/A')}")
-                        print(f"    Variables: {', '.join(details['vars'])}")
+                        print(f"    Variables:")
+                        vd = details.get("var_details", {})
+                        for vname in details["vars"]:
+                            info_v = vd.get(vname, {})
+                            dt = info_v.get("dtype", "?")
+                            nd = info_v.get("nodata", "?")
+                            print(f"      {vname:30s}  dtype={dt}  nodata={nd}")
                 return "Inspection Complete."
             except Exception as e:
                 import traceback
