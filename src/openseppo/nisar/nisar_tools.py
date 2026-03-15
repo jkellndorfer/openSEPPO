@@ -2386,9 +2386,12 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                 output_nodata = np.nan
 
             # --- DUAL-POL RATIO: append as extra band after transform ---
+            # With -dpratio, ancillary vars are already stripped from variable_names,
+            # so _bsc_indices maps 1:1 onto processed_data bands.
             if dualpol_ratio and _ratio_pol_override:
-                num_idx = _bsc_var_names.index(_ratio_num_var)
-                den_idx = _bsc_var_names.index(_ratio_den_var)
+                _bsc_var_list = [variable_names[i] for i in _bsc_indices]
+                num_idx = _bsc_var_list.index(_ratio_num_var)
+                den_idx = _bsc_var_list.index(_ratio_den_var)
 
                 if logic_mode == "amp":
                     # (amp_likepol / amp_crosspol) * 1000 -> uint16, nodata=0, clamp [1, 65535]
