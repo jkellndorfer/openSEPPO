@@ -553,15 +553,37 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
         else:
             output_fs = _s3fs.S3FileSystem(anon=False)
 
+    # For S3 output, write VRTs to a local temp dir then sync in one shot.
+    _is_s3 = output_path.startswith("s3://")
+    _local_vrt_dir = None
+    if _is_s3:
+        import tempfile as _tempfile
+        _local_vrt_dir = _tempfile.mkdtemp(prefix="openseppo_vrts_")
+
     def write_vrt(path, xml_str):
         data = xml_str.encode("utf-8")
-        if output_fs:
-            with output_fs.open(path, "wb") as fh:
+        if _local_vrt_dir:
+            local_path = os.path.join(_local_vrt_dir, os.path.basename(path))
+            with open(local_path, "wb") as fh:
                 fh.write(data)
         else:
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
             with open(path, "wb") as fh:
                 fh.write(data)
+
+    def _sync_vrts_to_s3():
+        """Sync local VRT temp dir to S3 in one bulk operation."""
+        if not _local_vrt_dir or not _is_s3:
+            return
+        import subprocess
+        cmd = ["aws", "s3", "sync", _local_vrt_dir, out_dir + "/",
+               "--exclude", "*", "--include", "*.vrt", "--include", "*.txt",
+               "--no-progress"]
+        if verbose:
+            print(f"    Syncing VRTs to {out_dir}/...", flush=True)
+        subprocess.run(cmd, check=True)
+        import shutil
+        shutil.rmtree(_local_vrt_dir, ignore_errors=True)
 
     # --- Collect all TIFs (backscatter + ancillary) and parse metadata ---
     tif_files = _list_all_nisar_tifs(output_path, frequency, mode_str, output_fs)
@@ -811,6 +833,7 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
                         ]
                         summary["backscatter"]["single_dates"].append(vrt_path)
 
+    _sync_vrts_to_s3()
     _print_vrt_summary(output_path, summary)
 
 
