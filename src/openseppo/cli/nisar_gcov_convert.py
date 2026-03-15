@@ -428,18 +428,27 @@ def _list_ancillary_tifs(output_path, frequency, output_fs=None):
     return sorted(results)
 
 
+def _green(text):
+    """Wrap text in green ANSI escape if stdout is a terminal."""
+    if hasattr(sys.stdout, "isatty") and sys.stdout.isatty():
+        return f"\033[32m{text}\033[0m"
+    return text
+
+
 def _print_vrt_summary(output_path, snapshot_vrts, per_track_vrts, combined_vrts,
                        ancillary_tifs=None, mosaic_vrts=None):
     """Print a formatted VRT summary grouped for copy-paste into a GIS application."""
     is_s3 = output_path.startswith("s3://")
     if is_s3:
         bucket = output_path.replace("s3://", "").split("/")[0]
-        print(f"\nBucket: {bucket}")
+        print(f"\n{_green('---> Bucket:')}")
+        print(bucket)
 
         def key(p):
             return p.replace("s3://", "").split("/", 1)[1]
     else:
-        print(f"\nPath: {output_path.rstrip('/')}")
+        print(f"\n{_green('---> Path:')}")
+        print(output_path.rstrip("/"))
 
         def key(p):
             return p
@@ -448,30 +457,26 @@ def _print_vrt_summary(output_path, snapshot_vrts, per_track_vrts, combined_vrts
     has_anc = bool(ancillary_tifs)
 
     if has_bsc:
-        print()
-        print("Backscatter:")
+        print(f"\n{_green('---> Backscatter:')}")
         if snapshot_vrts:
             for p in sorted(snapshot_vrts):
-                print(f"  {key(p)}")
+                print(key(p))
         if mosaic_vrts:
             for p in sorted(mosaic_vrts):
-                print(f"  {key(p)}")
+                print(key(p))
         if per_track_vrts:
-            print()
-            print("  Time series by track:")
+            print(f"\n{_green('---> Time series by track:')}")
             for p in sorted(per_track_vrts):
-                print(f"  {key(p)}")
+                print(key(p))
         if combined_vrts:
-            print()
-            print("  Combined time series:")
+            print(f"\n{_green('---> Combined time series:')}")
             for p in sorted(combined_vrts):
-                print(f"  {key(p)}")
+                print(key(p))
 
     if has_anc:
-        print()
-        print("Ancillary:")
+        print(f"\n{_green('---> Ancillary:')}")
         for p in sorted(ancillary_tifs):
-            print(f"  {key(p)}")
+            print(key(p))
 
 
 def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_auth=None):
