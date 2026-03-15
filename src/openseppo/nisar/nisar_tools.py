@@ -496,12 +496,12 @@ def recommend_ec2_instance(width, height, num_bands=1, downscale_factor=1):
 
 
 # -- Ancillary grid handling ---------------------------------------------------
-# Maps HDF5 variable name -> (output_suffix, downscale_method, warp_resampling).
+# Maps HDF5 variable name -> (suffix, downscale, warp_resampling, out_dtype, nodata).
 # Variables not in this dict are treated as backscatter (power) data.
 _ANCILLARY_GRIDS = {
-    "mask":                    ("mask",        "bitwise_or", "nearest"),
-    "numberOfLooks":           ("nlooks",      "sum",        "sum"),
-    "rtcGammaToSigmaFactor":   ("gamma2sigma", "mean",       "average"),
+    "mask":                    ("mask",        "mask_priority", "nearest", "uint8",   255),
+    "numberOfLooks":           ("nlooks",      "sum",           "sum",     "float32", np.nan),
+    "rtcGammaToSigmaFactor":   ("gamma2sigma", "mean",          "average", "float32", np.nan),
 }
 
 
@@ -523,13 +523,21 @@ def _ancillary_warp_resampling(var):
     return _ANCILLARY_GRIDS[var][2]
 
 
+def _ancillary_out_dtype(var):
+    return _ANCILLARY_GRIDS[var][3]
+
+
+def _ancillary_nodata(var):
+    return _ANCILLARY_GRIDS[var][4]
+
+
 def _downscale_block(data_3d, factor, method="mean"):
     """Block-downscale a (1, H, W) array using the given aggregation.
 
     Methods:
-        mean        -- nanmean  (power, gamma2sigma)
-        sum         -- nansum   (numberOfLooks)
-        bitwise_or  -- per-bit OR via vectorised reduce (mask bitmask: any flag wins)
+        mean           -- nanmean  (power, gamma2sigma)
+        sum            -- nansum   (numberOfLooks)
+        mask_priority  -- NISAR mask: 255 (fill) > 0 (invalid) > subswath (valid)
     """
     _, h, w = data_3d.shape
     new_h = h - (h % factor)
@@ -539,11 +547,16 @@ def _downscale_block(data_3d, factor, method="mean"):
     cropped = data_3d[:, :new_h, :new_w]
     reshaped = cropped.reshape(1, new_h // factor, factor, new_w // factor, factor)
 
-    if method == "bitwise_or":
-        int_view = np.nan_to_num(reshaped, nan=0.0).astype(np.uint32)
-        result = np.bitwise_or.reduce(int_view, axis=2)
-        result = np.bitwise_or.reduce(result, axis=3)
-        return result.astype(np.float32)
+    if method == "mask_priority":
+        # Vectorised priority: 255 (fill) > 0 (invalid) > subswath value.
+        # NaN (from float32 read) is treated as fill (255).
+        # Two reductions (max + min) instead of boolean array creation.
+        int_view = np.nan_to_num(reshaped, nan=255.0).astype(np.uint8)
+        max_val = np.max(int_view, axis=(2, 4))
+        min_val = np.min(int_view, axis=(2, 4))
+        result = np.where(max_val == 255, np.uint8(255),
+                 np.where(min_val == 0, np.uint8(0), max_val))
+        return result.astype(np.float32)[np.newaxis, :, :]  # keep (1, H, W) shape
 
     with np.errstate(invalid="ignore"):
         if method == "sum":
@@ -2108,12 +2121,14 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                     file_url, input_fs, info["grid_path"], [var], row, h, col, w, n_workers=read_threads
                 )[0]
 
+                _var_is_anc = _is_ancillary(var)
+
                 # Take magnitude of off-diagonal (complex) GCOV elements
                 if np.iscomplexobj(band_data):
                     band_data = np.abs(band_data).astype(np.float32)
 
-                # Apply gamma0-to-sigma0 conversion (before downscaling/resampling)
-                if _sigma_data is not None:
+                # Apply gamma0-to-sigma0 conversion (backscatter only)
+                if _sigma_data is not None and not _var_is_anc:
                     band_data = band_data * _sigma_data
 
                 # Reshape for downscaling (add band dimension)
@@ -2123,22 +2138,41 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                 if downscale_factor and downscale_factor > 1:
                     if verbose:
                         print(f"        Downscaling by {downscale_factor} -> {abs(out_res_x):.2f} x {abs(out_res_y):.2f}", flush=True)
-                    band_data = perform_downscaling(band_data, downscale_factor)
+                    if _var_is_anc:
+                        band_data = _downscale_block(band_data, downscale_factor, _ancillary_downscale_method(var))
+                    else:
+                        band_data = perform_downscaling(band_data, downscale_factor)
 
-                # Reproject (on raw power data, before dtype conversion)
+                # Reproject / resample
                 if needs_reproject and warp_kw is not None:
                     if verbose:
                         print(f"        Reprojecting {var}...", flush=True)
-                    band_data_2d = _reproject_power_band(band_data[0], **warp_kw)
+                    if _var_is_anc:
+                        band_data_2d = _reproject_ancillary_band(
+                            band_data[0],
+                            src_transform=warp_kw["src_transform"],
+                            src_crs=warp_kw["src_crs"],
+                            dst_transform=warp_kw["dst_transform"],
+                            dst_crs=warp_kw["dst_crs"],
+                            dst_width=warp_kw["dst_width"],
+                            dst_height=warp_kw["dst_height"],
+                            resample_name=_ancillary_warp_resampling(var),
+                            num_threads=warp_kw.get("num_threads"),
+                        )
+                    else:
+                        band_data_2d = _reproject_power_band(band_data[0], **warp_kw)
                     band_data = band_data_2d[np.newaxis, :, :]
-                elif fill_holes:
+                elif fill_holes and not _var_is_anc:
                     band_data[0] = _fill_nodata_nn(band_data[0])
 
                 # Get output dimensions
                 _, h_out, w_out = band_data.shape
 
-                # Transform
-                if logic_mode == "amp":
+                # Transform -- ancillary grids bypass power scaling
+                if _var_is_anc:
+                    output_dtype = _ancillary_out_dtype(var)
+                    output_nodata = _ancillary_nodata(var)
+                elif logic_mode == "amp":
                     band_data = pwr_to_amp(band_data)
                     output_dtype = "uint16"
                     output_nodata = 0
@@ -2157,20 +2191,32 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                 # Remove band dimension for writing
                 band_data = band_data[0, :, :]
 
-                # Replace +/-inf with NaN so COG overview averaging excludes them
-                if output_dtype == "float32":
+                # Final dtype cast and nodata cleanup
+                if output_dtype == "uint8":
+                    band_data = np.nan_to_num(band_data, nan=output_nodata).astype(np.uint8)
+                elif output_dtype == "float32":
                     band_data[~np.isfinite(band_data)] = np.nan
 
-                # Write
-                pol_str = var.lower() if _is_qp else var[:2].lower()
-                suffix = f"-EBD_{frequency}_{pol_str}_{mode_str}.tif"
+                # Write -- ancillary grids get their own suffix
+                if _var_is_anc:
+                    suffix = f"-EBD_{frequency}_{_ancillary_suffix(var)}.tif"
+                else:
+                    pol_str = var.lower() if _is_qp else var[:2].lower()
+                    suffix = f"-EBD_{frequency}_{pol_str}_{mode_str}.tif"
 
                 if final_path.endswith(".tif"):
                     band_path = final_path[:-4] + suffix
                 else:
                     band_path = final_path + suffix
 
-                profile = {"driver": _driver, "height": h_out, "width": w_out, "count": 1, "dtype": output_dtype, "crs": out_crs, "transform": out_transform, "compress": "deflate", "nodata": output_nodata, **_gtiff_extra, **_write_extra}
+                # Per-band write options: predictor and overview resampling
+                # depend on output dtype (int vs float) and variable type
+                _band_predictor = 2 if output_dtype in ("uint8", "uint16") else 3
+                _band_write = dict(_write_extra, predictor=_band_predictor)
+                if _var_is_anc and var == "mask" and _driver == "COG":
+                    _band_write["overview_resampling"] = "nearest"
+
+                profile = {"driver": _driver, "height": h_out, "width": w_out, "count": 1, "dtype": output_dtype, "crs": out_crs, "transform": out_transform, "compress": "deflate", "nodata": output_nodata, **_gtiff_extra, **_band_write}
 
                 with rasterio.Env(GDAL_NUM_THREADS=_n_th, GDAL_OVR_PROPAGATE_NODATA="NO"):
                     with MemoryFile() as memfile:
@@ -2205,55 +2251,91 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
 
         # === NORMAL MODE: Process all bands at once ===
         else:
+            # Separate ancillary bands from backscatter so that
+            # downscale/warp/transform can use the correct strategy per type.
+            _anc_indices = [i for i, v in enumerate(variable_names) if _is_ancillary(v)]
+            _bsc_indices = [i for i, v in enumerate(variable_names) if not _is_ancillary(v)]
+            _anc_data = {variable_names[i]: data_stack[i] for i in _anc_indices}  # 2-D each
+            if _bsc_indices:
+                data_stack = data_stack[_bsc_indices]
+            else:
+                data_stack = np.empty((0,) + data_stack.shape[1:], dtype=np.float32)
+
+            # -- Downscale backscatter (nanmean) --
             if downscale_factor and downscale_factor > 1:
                 if verbose:
                     print(f"    Downscaling by {downscale_factor} -> {abs(out_res_x):.2f} x {abs(out_res_y):.2f}", flush=True)
-                data_stack = perform_downscaling(data_stack, downscale_factor)
+                if data_stack.shape[0] > 0:
+                    data_stack = perform_downscaling(data_stack, downscale_factor)
+                for vname, arr in _anc_data.items():
+                    _anc_data[vname] = _downscale_block(
+                        arr[np.newaxis], downscale_factor, _ancillary_downscale_method(vname)
+                    )[0]
 
-            # Reproject (on raw power data, before dtype conversion)
+            # -- Reproject / resample --
             if needs_reproject and warp_kw is not None:
                 if verbose:
                     print(f"    Reprojecting {len(variable_names)} bands...", flush=True)
-                n_bands = data_stack.shape[0]
-                warped = np.full((n_bands, warp_kw["dst_height"], warp_kw["dst_width"]), np.nan, dtype=np.float32)
-                for bi in range(n_bands):
-                    warped[bi] = _reproject_power_band(data_stack[bi], **warp_kw)
-                data_stack = warped
+                if data_stack.shape[0] > 0:
+                    n_bsc = data_stack.shape[0]
+                    warped = np.full((n_bsc, warp_kw["dst_height"], warp_kw["dst_width"]), np.nan, dtype=np.float32)
+                    for bi in range(n_bsc):
+                        warped[bi] = _reproject_power_band(data_stack[bi], **warp_kw)
+                    data_stack = warped
+                for vname, arr in _anc_data.items():
+                    _anc_data[vname] = _reproject_ancillary_band(
+                        arr,
+                        src_transform=warp_kw["src_transform"],
+                        src_crs=warp_kw["src_crs"],
+                        dst_transform=warp_kw["dst_transform"],
+                        dst_crs=warp_kw["dst_crs"],
+                        dst_width=warp_kw["dst_width"],
+                        dst_height=warp_kw["dst_height"],
+                        resample_name=_ancillary_warp_resampling(vname),
+                        num_threads=warp_kw.get("num_threads"),
+                    )
             elif fill_holes:
                 for bi in range(data_stack.shape[0]):
                     data_stack[bi] = _fill_nodata_nn(data_stack[bi])
+                # No hole-fill for ancillary grids
 
-            _, h_out, w_out = data_stack.shape
+            if data_stack.shape[0] > 0:
+                _, h_out, w_out = data_stack.shape
+            elif _anc_data:
+                _first_anc = next(iter(_anc_data.values()))
+                h_out, w_out = _first_anc.shape
+            else:
+                raise ValueError("No bands to process.")
 
-            # --- TRANSFORM LOGIC ---
+            # --- TRANSFORM LOGIC (backscatter only) ---
             if verbose:
                 print(f"    Transforming: {mode_str} (Mode: {logic_mode})", flush=True)
 
-            if logic_mode == "amp":
+            if data_stack.shape[0] == 0:
+                processed_data = data_stack
+                output_dtype = "float32"
+                output_nodata = np.nan
+            elif logic_mode == "amp":
                 processed_data = pwr_to_amp(data_stack)
                 output_dtype = "uint16"
                 output_nodata = 0
-
             elif logic_mode == "dn":
                 processed_data = power_to_dn_uint8(data_stack)
                 output_dtype = "uint8"
                 output_nodata = 0
-
             elif logic_mode == "db":
                 processed_data = power_to_db_float32(data_stack)
                 output_dtype = "float32"
                 output_nodata = np.nan
-
             else:
-                # No Transform ("pwr" or None)
                 processed_data = data_stack
                 output_dtype = "float32"
                 output_nodata = np.nan
 
             # --- DUAL-POL RATIO: append as extra band after transform ---
             if dualpol_ratio and _ratio_pol_override:
-                num_idx = variable_names.index(_ratio_num_var)
-                den_idx = variable_names.index(_ratio_den_var)
+                num_idx = _bsc_var_names.index(_ratio_num_var)
+                den_idx = _bsc_var_names.index(_ratio_den_var)
 
                 if logic_mode == "amp":
                     # (amp_likepol / amp_crosspol) * 1000 -> uint16, nodata=0, clamp [1, 65535]
@@ -2291,29 +2373,55 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                 variable_names = list(variable_names) + [_ratio_band_name]
 
             # Replace +/-inf with NaN so COG overview averaging excludes them
-            if output_dtype == "float32":
+            if output_dtype == "float32" and processed_data.shape[0] > 0:
                 processed_data[~np.isfinite(processed_data)] = np.nan
+
+            # Build ordered write list: (var_name, 2d_array, dtype, nodata)
+            # Backscatter bands (incl. ratio) come from processed_data;
+            # ancillary from _anc_data.
+            _write_list = []
+            _bsc_idx = 0
+            for var in variable_names:
+                if _is_ancillary(var):
+                    _write_list.append((var, _anc_data[var], _ancillary_out_dtype(var), _ancillary_nodata(var)))
+                else:
+                    _write_list.append((var, processed_data[_bsc_idx], output_dtype, output_nodata))
+                    _bsc_idx += 1
 
             if single_bands:
                 if verbose:
                     print("    Writing separate bands...", flush=True)
                     _t_write = _time.perf_counter()
                 generated_files = []
-                for i, var in enumerate(variable_names):
-                    pol_str = (_ratio_pol_override if var == _ratio_band_name
-                               else var[:2].lower() if dualpol_ratio
-                               else var.lower() if _is_qp
-                               else var[:2].lower())
-                    suffix = f"-EBD_{frequency}_{pol_str}_{mode_str}.tif"
+                for var, band_data, _bd_dtype, _bd_nodata in _write_list:
+                    _var_is_anc = _is_ancillary(var)
+
+                    # Suffix
+                    if _var_is_anc:
+                        suffix = f"-EBD_{frequency}_{_ancillary_suffix(var)}.tif"
+                    else:
+                        pol_str = (_ratio_pol_override if var == _ratio_band_name
+                                   else var[:2].lower() if dualpol_ratio
+                                   else var.lower() if _is_qp
+                                   else var[:2].lower())
+                        suffix = f"-EBD_{frequency}_{pol_str}_{mode_str}.tif"
 
                     if final_path.endswith(".tif"):
                         band_path = final_path[:-4] + suffix
                     else:
                         band_path = final_path + suffix
 
-                    band_data = processed_data[i, :, :]
+                    # Final dtype cast
+                    if _bd_dtype == "uint8":
+                        band_data = np.nan_to_num(band_data, nan=float(_bd_nodata)).astype(np.uint8)
 
-                    profile = {"driver": _driver, "height": h_out, "width": w_out, "count": 1, "dtype": output_dtype, "crs": out_crs, "transform": out_transform, "compress": "deflate", "nodata": output_nodata, **_gtiff_extra, **_write_extra}
+                    # Per-band write options
+                    _band_predictor = 2 if _bd_dtype in ("uint8", "uint16") else 3
+                    _band_write = dict(_write_extra, predictor=_band_predictor)
+                    if _var_is_anc and var == "mask" and _driver == "COG":
+                        _band_write["overview_resampling"] = "nearest"
+
+                    profile = {"driver": _driver, "height": h_out, "width": w_out, "count": 1, "dtype": _bd_dtype, "crs": out_crs, "transform": out_transform, "compress": "deflate", "nodata": _bd_nodata, **_gtiff_extra, **_band_write}
 
                     with rasterio.Env(GDAL_OVR_PROPAGATE_NODATA="NO"):
                         with MemoryFile() as memfile:
