@@ -598,9 +598,12 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
         # Copy shared geo but keep per-file nodata from the ancillary table
         _file_geo = dict(geo)
         if meta["is_ancillary"]:
-            from openseppo.nisar.nisar_tools import _ancillary_nodata, _ancillary_out_dtype
-            _file_geo["nodata"] = _ancillary_nodata(meta["pol_str"])
-            _file_geo["dtype"] = _ancillary_out_dtype(meta["pol_str"])
+            # Map suffix back to HDF5 variable name for _ANCILLARY_GRIDS lookup
+            _suffix_to_var = {v[0]: k for k, v in nisar_tools._ANCILLARY_GRIDS.items()}
+            _anc_var = _suffix_to_var.get(meta["pol_str"])
+            if _anc_var:
+                _file_geo["nodata"] = nisar_tools._ancillary_nodata(_anc_var)
+                _file_geo["dtype"] = nisar_tools._ancillary_out_dtype(_anc_var)
         meta.update(_file_geo)
         all_metas.append(meta)
 
