@@ -358,7 +358,7 @@ def _generate_mosaic_vrt_xml(frame_items, crs_wkt, dtype, metadata=None):
     return "\n".join(lines), union_tf, union_w, union_h
 
 
-def _generate_ts_union_vrt_xml(crs_wkt, stack_items, dtype):
+def _generate_ts_union_vrt_xml(crs_wkt, stack_items, dtype, nodata=None, metadata=None):
     """
     Time-series VRT with union spatial extent (one band per timestep).
     Used when items have different spatial extents (e.g. A vs D tracks).
@@ -366,7 +366,9 @@ def _generate_ts_union_vrt_xml(crs_wkt, stack_items, dtype):
     stack_items: [{"path", "band_idx", "date", "transform", "w", "h", "nodata"(optional)}]
     """
     vrt_dtype = nisar_tools.get_gdal_dtype(dtype)
-    nodata_val = _gdal_nodata_str(stack_items[0].get("nodata"), dtype)
+    if nodata is None:
+        nodata = stack_items[0].get("nodata")
+    nodata_val = _gdal_nodata_str(nodata, dtype)
     res_x = abs(stack_items[0]["transform"].a)
     res_y = abs(stack_items[0]["transform"].e)
 
@@ -384,6 +386,8 @@ def _generate_ts_union_vrt_xml(crs_wkt, stack_items, dtype):
         f'  <SRS dataAxisToSRSAxisMapping="1,2">{crs_wkt}</SRS>',
         f"  <GeoTransform>{geo}</GeoTransform>",
     ]
+    if metadata:
+        lines.append(nisar_tools._vrt_metadata_xml(metadata))
     for i, it in enumerate(stack_items):
         dx = int(round((it["transform"].c - union_ulx) / res_x))
         dy = int(round((union_uly - it["transform"].f) / res_y))
@@ -441,7 +445,7 @@ def _make_ts_vrt(ts_items, crs_wkt, dtype, nodata=None, metadata=None):
     same_geo = all(it["w"] == ts_items[0]["w"] and it["h"] == ts_items[0]["h"] and it["transform"] == ts_items[0]["transform"] for it in ts_items)
     if same_geo:
         return nisar_tools.generate_vrt_xml_timeseries(ts_items[0]["w"], ts_items[0]["h"], ts_items[0]["transform"], crs_wkt, ts_items, dtype=dtype, nodata=nodata, metadata=metadata)
-    return _generate_ts_union_vrt_xml(crs_wkt, ts_items, dtype)
+    return _generate_ts_union_vrt_xml(crs_wkt, ts_items, dtype, nodata=nodata, metadata=metadata)
 
 
 def _list_vrts_in_dir(out_dir, output_fs):
@@ -768,7 +772,7 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
                             vrt_name = src_base.replace(".tif", "") + ebd
                         vrt_path = f"{out_dir}/{vrt_name}"
                         vrt_xml = nisar_tools.generate_vrt_xml_single_step(
-                            w, h, tf, crs_w, band_files, band_names, date, dtype=dt)
+                            w, h, tf, crs_w, band_files, band_names, date, dtype=dt, metadata=_vrt_meta)
                         write_vrt(vrt_path, vrt_xml)
                         # Replace individual pol TIFs/VRTs with the multi-pol VRT
                         covered = set(band_files)
