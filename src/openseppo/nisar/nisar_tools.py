@@ -2298,6 +2298,29 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
             else:
                 data_stack = np.empty((0,) + data_stack.shape[1:], dtype=np.float32)
 
+            # -- Check available memory before heavy processing --
+            _n_total = data_stack.shape[0] + len(_anc_data)
+            if needs_reproject and warp_kw is not None and _n_total > 0:
+                _dst_pixels = warp_kw["dst_height"] * warp_kw["dst_width"]
+            elif data_stack.shape[0] > 0:
+                _dst_pixels = data_stack.shape[1] * data_stack.shape[2]
+            else:
+                _dst_pixels = 0
+            # Peak: source stack + destination stack + warp buffers (~3x per band)
+            _peak_bytes = int(_n_total * 3 * _dst_pixels * 4)
+            try:
+                import psutil
+                _avail = psutil.virtual_memory().available
+            except ImportError:
+                _avail = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_AVPHYS_PAGES")
+            if _peak_bytes > _avail:
+                raise MemoryError(
+                    f"Estimated peak memory {_peak_bytes / 1e9:.1f} GB exceeds "
+                    f"available {_avail / 1e9:.1f} GB. "
+                    f"Use -projwin to subset, -d to downscale, "
+                    f"or process ancillary grids in a separate run."
+                )
+
             # -- Downscale backscatter (nanmean) --
             if downscale_factor and downscale_factor > 1:
                 if verbose:
