@@ -38,6 +38,7 @@ import argparse
 import shlex
 from pprint import pprint
 from collections import defaultdict
+import math
 import rasterio
 from rasterio.transform import from_origin
 import openseppo.nisar.nisar_tools as nisar_tools
@@ -285,6 +286,11 @@ def _vrt_src_entry(path):
 def _gdal_nodata_str(nodata, dtype):
     """Return a nodata string for VRT XML, preferring the explicit value from the TIF."""
     if nodata is not None:
+        try:
+            if math.isnan(nodata):
+                return "nan"
+        except (TypeError, ValueError):
+            pass
         v = int(nodata) if nodata == int(nodata) else nodata
         return str(v)
     d = str(dtype).lower()
