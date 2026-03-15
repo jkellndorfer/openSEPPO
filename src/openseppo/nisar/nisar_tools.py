@@ -815,7 +815,9 @@ def construct_timeseries_filename(sample_h5_url, min_date, max_date, frequency, 
         new_base = basename.replace(match.group(0), new_time_str)
     else:
         new_base = f"NISAR_TS_{min_date.replace('-', '')}_{max_date.replace('-', '')}"
-    return f"{new_base}-EBD_{frequency}_{pol}_{mode_str}.vrt"
+    if mode_str:
+        return f"{new_base}-EBD_{frequency}_{pol}_{mode_str}.vrt"
+    return f"{new_base}-EBD_{frequency}_{pol}.vrt"
 
 
 # =========================================================
@@ -2749,25 +2751,20 @@ def process_chunk_task(h5_url, variable_names, output_path, srcwin=None, projwin
             _bsc_vars_ts = [v for v in variable_names if not _is_ancillary(v)]
             _bsc_idx_map = {v: i for i, v in enumerate(_bsc_vars_ts)}
 
+            # Build per-variable time-series VRTs for backscatter only.
+            # Ancillary TS VRTs are built by build_track_vrts (mosaic-aware).
+            _bsc_count = 0
             for var_idx, var in enumerate(variable_names):
-                _var_is_anc = _is_ancillary(var)
-                if _var_is_anc:
-                    pol_str = _ancillary_suffix(var)
-                    _ts_dtype = _ancillary_out_dtype(var)
-                else:
-                    pol_str = var[:2].lower()
-                    _ts_dtype = ref_info["dtype"]
+                if _is_ancillary(var):
+                    continue
+
+                pol_str = var[:2].lower()
 
                 stack_items = []
                 dates_list = []
                 for r in valid_results:
                     fpath = r["files_map"][var]
-                    if _var_is_anc:
-                        b_idx = 1  # ancillary always separate TIFs
-                    elif single_bands:
-                        b_idx = 1
-                    else:
-                        b_idx = _bsc_idx_map[var] + 1
+                    b_idx = 1 if single_bands else (_bsc_idx_map[var] + 1)
                     item = {"path": fpath, "band_idx": b_idx, "date": r["date"]}
                     if not all_same_geom:
                         item["transform"] = r["info"]["transform"]
@@ -2777,23 +2774,20 @@ def process_chunk_task(h5_url, variable_names, output_path, srcwin=None, projwin
                     dates_list.append(r["date"].replace("-", ""))
 
                 if all_same_geom:
-                    vrt_xml = generate_vrt_xml_timeseries(ref_info["w"], ref_info["h"], ref_info["transform"], ref_info["crs"], stack_items, dtype=_ts_dtype)
+                    vrt_xml = generate_vrt_xml_timeseries(ref_info["w"], ref_info["h"], ref_info["transform"], ref_info["crs"], stack_items, dtype=ref_info["dtype"])
                 else:
-                    vrt_xml = generate_vrt_xml_timeseries_union(ref_info["crs"], stack_items, dtype=_ts_dtype)
+                    vrt_xml = generate_vrt_xml_timeseries_union(ref_info["crs"], stack_items, dtype=ref_info["dtype"])
 
-                # Ancillary layers use their suffix directly; backscatter uses pol+mode
-                if _var_is_anc:
-                    vrt_name = construct_timeseries_filename(valid_results[0]["h5_url"], min_date, max_date, frequency, pol_str, "")
-                else:
-                    vrt_name = construct_timeseries_filename(valid_results[0]["h5_url"], min_date, max_date, frequency, pol_str, mode_str)
+                vrt_name = construct_timeseries_filename(valid_results[0]["h5_url"], min_date, max_date, frequency, pol_str, mode_str)
                 out_dir = output_path.rstrip("/")
                 vrt_full_path = f"{out_dir}/{vrt_name}"
                 if verbose:
                     print(f"  --> VRT: {vrt_name}")
                 write_bytes(vrt_full_path, vrt_xml.encode("utf-8"))
                 write_bytes(vrt_full_path.replace(".vrt", ".dates"), "\n".join(dates_list).encode("utf-8"))
+                _bsc_count += 1
 
-            return f"Batch Complete. Generated {len(variable_names)} Time Series VRTs."
+            return f"Batch Complete. Generated {_bsc_count} Time Series VRTs."
 
         if len(results_meta) == 1:
             return "Done" if results_meta[0]["success"] else results_meta[0]["error"]

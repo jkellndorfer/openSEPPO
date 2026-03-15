@@ -250,10 +250,11 @@ def _list_all_nisar_tifs(output_path, frequency, mode_str, output_fs=None):
             return [f"s3://{f}" for f in files if _matches(f)]
         except Exception:
             return []
-    # Local: glob for backscatter + each ancillary suffix
+    # Local: glob for backscatter (tag + * + bsc_suffix)
+    # and ancillary (tag + suffix directly -- no wildcard gap to avoid double _)
     results = glob.glob(os.path.join(output_path, f"*{tag}*{bsc_suffix}"))
-    for asuf in anc_suffixes:
-        results.extend(glob.glob(os.path.join(output_path, f"*{tag}*{asuf}")))
+    for s in _KNOWN_ANC_SUFFIXES:
+        results.extend(glob.glob(os.path.join(output_path, f"*{tag}{s}.tif")))
     return sorted(set(results))
 
 
