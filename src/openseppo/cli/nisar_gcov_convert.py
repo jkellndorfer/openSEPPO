@@ -184,20 +184,28 @@ def get_auth_dict(profile_arg, use_earthdata=False):
 # =========================================================
 
 
+_KNOWN_ANC_SUFFIXES = {"mask", "nlooks", "gamma2sigma"}
+
+
 def _parse_nisar_tif_meta(tif_path):
-    """Parse NISAR metadata tokens from a COG TIF filename. Returns dict or None."""
+    """Parse NISAR metadata tokens from a COG TIF filename. Returns dict or None.
+
+    Handles both backscatter TIFs (3 EBD tokens: freq, pol, mode) and
+    ancillary TIFs (2 EBD tokens: freq, suffix like mask/nlooks/gamma2sigma).
+    """
     basename = os.path.basename(tif_path)
     if "-EBD_" not in basename:
         return None
     nisar_base, ebd_raw = basename.split("-EBD_", 1)
-    ebd_raw = ebd_raw.removesuffix(".tif")  # e.g. "A_hh_AMP"
-    ebd_tokens = ebd_raw.split("_")  # ["A", "hh", "AMP"]
-    if len(ebd_tokens) < 3:
+    ebd_raw = ebd_raw.removesuffix(".tif").removesuffix(".vrt")
+    ebd_tokens = ebd_raw.split("_")  # ["A", "hh", "AMP"] or ["A", "mask"]
+    if len(ebd_tokens) < 2:
         return None
     tokens = nisar_base.split("_")
     if len(tokens) < 18 or tokens[0] != "NISAR":
         return None
     try:
+        is_anc = len(ebd_tokens) == 2 and ebd_tokens[1] in _KNOWN_ANC_SUFFIXES
         return {
             "il": tokens[1],
             "pt": tokens[2],
@@ -214,8 +222,9 @@ def _parse_nisar_tif_meta(tif_path):
             "crid": tokens[13],
             "accuracy": tokens[14],
             "freq": ebd_tokens[0],
-            "pol_str": ebd_tokens[1],
-            "mode_str": ebd_tokens[2],
+            "pol_str": ebd_tokens[1] if not is_anc else ebd_tokens[1],
+            "mode_str": ebd_tokens[2] if len(ebd_tokens) >= 3 else None,
+            "is_ancillary": is_anc,
             "path": tif_path,
             "nisar_base": nisar_base,
         }
@@ -223,18 +232,29 @@ def _parse_nisar_tif_meta(tif_path):
         return None
 
 
-def _list_nisar_tifs(output_path, frequency, mode_str, output_fs=None):
-    """List NISAR COG TIF files matching frequency and mode in output_path."""
+def _list_all_nisar_tifs(output_path, frequency, mode_str, output_fs=None):
+    """List all NISAR TIF files (backscatter + ancillary) in output_path."""
     tag = f"-EBD_{frequency}_"
-    suffix = f"_{mode_str}.tif"
+    bsc_suffix = f"_{mode_str}.tif"
+    anc_suffixes = tuple(f"_{s}.tif" for s in _KNOWN_ANC_SUFFIXES)
+
+    def _matches(f):
+        if not f.endswith(".tif") or tag not in f:
+            return False
+        return f.endswith(bsc_suffix) or any(f.endswith(s) for s in anc_suffixes)
+
     if output_fs:
         bucket_path = output_path.replace("s3://", "")
         try:
             files = output_fs.ls(bucket_path)
-            return [f"s3://{f}" for f in files if f.endswith(".tif") and tag in f and suffix in f]
+            return [f"s3://{f}" for f in files if _matches(f)]
         except Exception:
             return []
-    return sorted(glob.glob(os.path.join(output_path, f"*{tag}*{suffix}")))
+    # Local: glob for backscatter + each ancillary suffix
+    results = glob.glob(os.path.join(output_path, f"*{tag}*{bsc_suffix}"))
+    for asuf in anc_suffixes:
+        results.extend(glob.glob(os.path.join(output_path, f"*{tag}*{asuf}")))
+    return sorted(set(results))
 
 
 def _read_tif_geo(tif_path, output_fs=None):
@@ -384,9 +404,13 @@ def _track_vrt_filename(metas, pol_str, mode_str):
     min_start = min(m["start_time"] for m in metas)
     max_end = max(m["end_time"] for m in metas)
 
+    if mode_str:
+        ebd = f"-EBD_{freq}_{pol_str}_{mode_str}.vrt"
+    else:
+        ebd = f"-EBD_{freq}_{pol_str}.vrt"
     return (f"NISAR_{il}_{pt}_{prod}_{cycle_str}_{track_str}_{dir_str}_"
             f"{frame_str}_{mode}_{pol}_{obs_mode}_{min_start}_{max_end}"
-            f"-EBD_{freq}_{pol_str}_{mode_str}.vrt")
+            f"{ebd}")
 
 
 def _make_ts_vrt(ts_items, crs_wkt, dtype):
@@ -409,25 +433,6 @@ def _list_vrts_in_dir(out_dir, output_fs):
     return _glob.glob(os.path.join(out_dir, "*.vrt"))
 
 
-def _list_ancillary_tifs(output_path, frequency, output_fs=None):
-    """List ancillary TIF files (mask, nlooks, gamma2sigma) in output_path."""
-    _anc_suffixes = ("_mask.tif", "_nlooks.tif", "_gamma2sigma.tif")
-    tag = f"-EBD_{frequency}"
-    if output_fs:
-        bucket_path = output_path.replace("s3://", "")
-        try:
-            files = output_fs.ls(bucket_path)
-            return [f"s3://{f}" for f in files
-                    if f.endswith(".tif") and tag in f
-                    and any(f.endswith(s) for s in _anc_suffixes)]
-        except Exception:
-            return []
-    results = []
-    for suf in _anc_suffixes:
-        results.extend(glob.glob(os.path.join(output_path, f"*{tag}*{suf}")))
-    return sorted(results)
-
-
 def _green(text):
     """Wrap text in green ANSI escape if stdout is a terminal."""
     if hasattr(sys.stdout, "isatty") and sys.stdout.isatty():
@@ -435,9 +440,16 @@ def _green(text):
     return text
 
 
-def _print_vrt_summary(output_path, snapshot_vrts, per_track_vrts, combined_vrts,
-                       ancillary_tifs=None, mosaic_vrts=None):
-    """Print a formatted VRT summary grouped for copy-paste into a GIS application."""
+def _print_vrt_summary(output_path, summary):
+    """Print a structured VRT/TIF summary for copy-paste into a GIS application.
+
+    *summary* is a dict with keys "backscatter" and "ancillary", each mapping
+    to a dict with optional sub-keys:
+        "single_dates"  -- list of paths (snapshot VRTs or single-frame TIFs)
+        "mosaics"       -- list of paths (spatial mosaic VRTs)
+        "ts_by_track"   -- list of paths (per-track time-series VRTs)
+        "combined_ts"   -- list of paths (multi-track combined VRTs)
+    """
     is_s3 = output_path.startswith("s3://")
     if is_s3:
         bucket = output_path.replace("s3://", "").split("/")[0]
@@ -453,51 +465,42 @@ def _print_vrt_summary(output_path, snapshot_vrts, per_track_vrts, combined_vrts
         def key(p):
             return p
 
-    has_bsc = snapshot_vrts or per_track_vrts or combined_vrts or mosaic_vrts
-    has_anc = bool(ancillary_tifs)
-
-    if has_bsc:
-        print(f"\n{_green('---> Backscatter:')}")
-        if snapshot_vrts:
-            for p in sorted(snapshot_vrts):
-                print(key(p))
-        if mosaic_vrts:
-            for p in sorted(mosaic_vrts):
-                print(key(p))
-        if per_track_vrts:
-            print(f"\n{_green('---> Time series by track:')}")
-            for p in sorted(per_track_vrts):
-                print(key(p))
-        if combined_vrts:
-            print(f"\n{_green('---> Combined time series:')}")
-            for p in sorted(combined_vrts):
-                print(key(p))
-
-    if has_anc:
-        print(f"\n{_green('---> Ancillary:')}")
-        for p in sorted(ancillary_tifs):
+    for section, label in [("backscatter", "Backscatter"), ("ancillary", "Ancillary")]:
+        data = summary.get(section, {})
+        singles = data.get("single_dates", [])
+        mosaics = data.get("mosaics", [])
+        ts_track = data.get("ts_by_track", [])
+        combined = data.get("combined_ts", [])
+        if not any([singles, mosaics, ts_track, combined]):
+            continue
+        print(f"\n{_green(f'---> {label}:')}")
+        for p in sorted(singles + mosaics):
             print(key(p))
+        if ts_track:
+            print(f"\n{_green(f'---> {label} time series by track:')}")
+            for p in sorted(ts_track):
+                print(key(p))
+        if combined:
+            print(f"\n{_green(f'---> {label} combined time series:')}")
+            for p in sorted(combined):
+                print(key(p))
 
 
 def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_auth=None):
     """
-    Post-process: build per-track (and combined) time-series VRTs, then print
-    a formatted summary of all VRTs grouped by type for GIS copy-paste.
+    Post-process: build VRTs in four phases, then print a structured summary.
 
-    Rules:
-      - Multiple frames for the same track+direction:
-          build a spatial mosaic VRT per cycle, then a time-series VRT over those.
-      - Single frame per track+direction:
-          build a per-track time-series VRT directly from individual TIF files.
-      - More than one (track, direction) group:
-          additionally build a combined multi-track time-series VRT with a
-          _track_frames.txt sidecar listing all track/direction/frame combos.
+    Phase 1 -- Grid mosaic VRTs: for each (track, dir, cycle, grid), when
+               multiple frames exist, build a spatial mosaic VRT.
+    Phase 2 -- Single-date multi-pol VRTs: for each acquisition date, combine
+               backscatter polarizations into one VRT (from mosaics or TIFs).
+    Phase 3 -- Per-track time-series VRTs: one band per date, per grid variable.
+    Phase 4 -- Combined multi-track time-series VRTs: when >1 track exists.
     """
     import s3fs as _s3fs
 
     out_dir = output_path.rstrip("/")
 
-    # Set up filesystem
     output_fs = None
     if output_path.startswith("s3://"):
         auth = output_auth or {}
@@ -518,10 +521,10 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
             with open(path, "wb") as fh:
                 fh.write(data)
 
-    # 1. Collect backscatter TIF files and parse metadata + geometry
-    tif_files = _list_nisar_tifs(output_path, frequency, mode_str, output_fs)
+    # --- Collect all TIFs (backscatter + ancillary) and parse metadata ---
+    tif_files = _list_all_nisar_tifs(output_path, frequency, mode_str, output_fs)
     all_metas = []
-    for fpath in (tif_files or []):
+    for fpath in tif_files:
         meta = _parse_nisar_tif_meta(fpath)
         if meta is None:
             continue
@@ -532,45 +535,50 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
         meta.update({"transform": tf, "w": w, "h": h, "crs_wkt": crs_wkt, "dtype": dtype})
         all_metas.append(meta)
 
+    bsc_metas = [m for m in all_metas if not m["is_ancillary"]]
+    anc_metas = [m for m in all_metas if m["is_ancillary"]]
+
     if verbose and all_metas:
-        print(f"  build_track_vrts: {len(all_metas)} backscatter TIF files across "
-              f"{len({m['track'] for m in all_metas})} track(s).")
+        print(f"  build_track_vrts: {len(bsc_metas)} backscatter + {len(anc_metas)} ancillary TIFs "
+              f"across {len({m['track'] for m in all_metas})} track(s).")
 
-    # 1b. Collect ancillary TIFs (mask, nlooks, gamma2sigma)
-    ancillary_tifs = _list_ancillary_tifs(output_path, frequency, output_fs)
+    # Accumulate results for the summary display
+    summary = {"backscatter": {"single_dates": [], "mosaics": [], "ts_by_track": [], "combined_ts": []},
+               "ancillary":   {"single_dates": [], "mosaics": [], "ts_by_track": [], "combined_ts": []}}
 
-    per_track_vrts = []
-    combined_vrts = []
-    mosaic_vrt_paths = []
+    # ======================================================================
+    # Process each category (backscatter, then ancillary) through 4 phases
+    # ======================================================================
+    for category, cat_metas in [("backscatter", bsc_metas), ("ancillary", anc_metas)]:
+        if not cat_metas:
+            continue
 
-    if all_metas:
-        # 2. Iterate by polarization (handles multi-pol batches independently)
+        # Group by pol_str (e.g. "hh", "hv" or "mask", "nlooks", "gamma2sigma")
         by_pol = defaultdict(list)
-        for m in all_metas:
+        for m in cat_metas:
             by_pol[m["pol_str"]].append(m)
+
+        # Phase 2 collector: date -> list of (path, pol_str) for multi-pol VRTs
+        # Key: (nisar_base_prefix, date) -> [(path_or_mosaic, pol_str)]
+        date_pol_sources = defaultdict(list)
 
         for pol_str, pol_metas in sorted(by_pol.items()):
             crs_wkt = pol_metas[0]["crs_wkt"]
             dtype = pol_metas[0]["dtype"]
+            _ms = pol_metas[0]["mode_str"]  # None for ancillary
 
-            # 3. Group by (track, direction)
+            # Group by (track, direction)
             by_td = defaultdict(list)
             for m in pol_metas:
                 by_td[(m["track"], m["direction"])].append(m)
 
-            # Accumulate per-(track,direction) time-series items
             track_dir_ts = {}
 
             for (track, direction), td_metas in sorted(by_td.items()):
-                frames_in_group = sorted({m["frame"] for m in td_metas})
-                n_cycles = len({m["cycle"] for m in td_metas})
+                frames = sorted({m["frame"] for m in td_metas})
 
-                if len(frames_in_group) > 1:
-                    # -- Multiple frames: mosaic per cycle --
-                    if verbose:
-                        print(f"    Track {track:03d}/{direction}: "
-                              f"{len(frames_in_group)} frames -> mosaic VRTs")
-
+                # --- Phase 1: Grid mosaic VRTs ---
+                if len(frames) > 1:
                     by_cycle = defaultdict(list)
                     for m in td_metas:
                         by_cycle[m["cycle"]].append(m)
@@ -584,68 +592,56 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
                         max_fr = max(m["frame"] for m in frame_items)
                         min_st = min(m["start_time"] for m in frame_items)
                         max_et = max(m["end_time"] for m in frame_items)
+                        ebd = f"-EBD_{frequency}_{pol_str}_{_ms}.vrt" if _ms else f"-EBD_{frequency}_{pol_str}.vrt"
                         mosaic_name = (f"NISAR_{m0['il']}_{m0['pt']}_{m0['prod']}_{cycle:03d}_{track:03d}_"
                                        f"{direction}_{min_fr:03d}-{max_fr:03d}_{m0['mode']}_{m0['polarization']}_"
                                        f"{m0['obs_mode']}_{min_st}_{max_et}_{m0['accuracy']}_{m0['crid']}"
-                                       f"-EBD_{frequency}_{pol_str}_{mode_str}_mosaic.vrt")
+                                       f"{ebd}")
                         mosaic_path = f"{out_dir}/{mosaic_name}"
                         write_vrt(mosaic_path, mosaic_xml)
-                        mosaic_vrt_paths.append(mosaic_path)
+                        summary[category]["mosaics"].append(mosaic_path)
                         if verbose:
-                            print(f"      Mosaic VRT: {mosaic_name}")
+                            print(f"      Mosaic: {mosaic_name}")
 
                         ds = min_st[:8]
-                        mosaic_items.append(
-                            {
-                                "path": mosaic_path,
-                                "band_idx": 1,
-                                "date": f"{ds[:4]}-{ds[4:6]}-{ds[6:]}",
-                                "transform": union_tf,
-                                "w": union_w,
-                                "h": union_h,
-                            }
-                        )
+                        mi = {"path": mosaic_path, "band_idx": 1,
+                              "date": f"{ds[:4]}-{ds[4:6]}-{ds[6:]}",
+                              "transform": union_tf, "w": union_w, "h": union_h}
+                        mosaic_items.append(mi)
+                        if category == "backscatter":
+                            date_pol_sources[(m0["nisar_base"], mi["date"])].append((mosaic_path, pol_str))
 
-                    # Only build time-series VRT when >1 cycle
-                    if len(mosaic_items) > 1:
-                        ts_xml = _make_ts_vrt(mosaic_items, crs_wkt, dtype)
-                        ts_name = _track_vrt_filename(td_metas, pol_str, mode_str)
-                        ts_path = f"{out_dir}/{ts_name}"
-                        write_vrt(ts_path, ts_xml)
-                        if verbose:
-                            print(f"    TS VRT (track {track:03d}/{direction}): {ts_name}")
-                        per_track_vrts.append(ts_path)
                     track_dir_ts[(track, direction)] = {"ts_items": mosaic_items, "metas": td_metas}
 
                 else:
-                    # -- Single frame --
+                    # Single frame -- use TIF directly
                     sorted_metas = sorted(td_metas, key=lambda x: x["start_time"])
                     ts_items = []
                     for m in sorted_metas:
                         ds = m["start_time"][:8]
-                        ts_items.append(
-                            {
-                                "path": m["path"],
-                                "band_idx": 1,
-                                "date": f"{ds[:4]}-{ds[4:6]}-{ds[6:]}",
-                                "transform": m["transform"],
-                                "w": m["w"],
-                                "h": m["h"],
-                            }
-                        )
+                        ti = {"path": m["path"], "band_idx": 1,
+                              "date": f"{ds[:4]}-{ds[4:6]}-{ds[6:]}",
+                              "transform": m["transform"], "w": m["w"], "h": m["h"]}
+                        ts_items.append(ti)
+                        if category == "backscatter":
+                            date_pol_sources[(m["nisar_base"], ti["date"])].append((m["path"], pol_str))
 
-                    # Only build time-series VRT when >1 timestep
-                    if len(ts_items) > 1:
-                        ts_xml = _make_ts_vrt(ts_items, crs_wkt, dtype)
-                        ts_name = _track_vrt_filename(td_metas, pol_str, mode_str)
-                        ts_path = f"{out_dir}/{ts_name}"
-                        write_vrt(ts_path, ts_xml)
-                        if verbose:
-                            print(f"    TS VRT (track {track:03d}/{direction}): {ts_name}")
-                        per_track_vrts.append(ts_path)
                     track_dir_ts[(track, direction)] = {"ts_items": ts_items, "metas": td_metas}
 
-            # 4. Combined multi-track VRT: only when >1 (track, direction) group AND >1 total timestep
+            # --- Phase 3: Per-track time-series VRTs ---
+            for (track, direction), info in sorted(track_dir_ts.items()):
+                ts_items = info["ts_items"]
+                td_metas = info["metas"]
+                if len(ts_items) > 1:
+                    ts_xml = _make_ts_vrt(ts_items, crs_wkt, dtype)
+                    ts_name = _track_vrt_filename(td_metas, pol_str, _ms)
+                    ts_path = f"{out_dir}/{ts_name}"
+                    write_vrt(ts_path, ts_xml)
+                    summary[category]["ts_by_track"].append(ts_path)
+                    if verbose:
+                        print(f"    TS VRT: {ts_name}")
+
+            # --- Phase 4: Combined multi-track VRT ---
             if len(track_dir_ts) > 1:
                 combined_items = sorted(
                     [item for info in track_dir_ts.values() for item in info["ts_items"]],
@@ -654,12 +650,12 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
                 if len(combined_items) > 1:
                     combined_metas = [m for info in track_dir_ts.values() for m in info["metas"]]
                     combined_xml = _make_ts_vrt(combined_items, crs_wkt, dtype)
-                    combined_name = _track_vrt_filename(combined_metas, pol_str, mode_str)
+                    combined_name = _track_vrt_filename(combined_metas, pol_str, _ms)
                     combined_path = f"{out_dir}/{combined_name}"
                     write_vrt(combined_path, combined_xml)
+                    summary[category]["combined_ts"].append(combined_path)
                     if verbose:
                         print(f"    Combined TS VRT: {combined_name}")
-                    combined_vrts.append(combined_path)
 
                     tf_combos = sorted(
                         {(m["track"], m["direction"], m["frame"]) for m in combined_metas},
@@ -668,23 +664,45 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
                     sidecar_content = "\n".join(f"{t:03d}_{d}_{f:03d}" for t, d, f in tf_combos) + "\n"
                     sidecar_path = combined_path[:-4] + "_track_frames.txt"
                     write_vrt(sidecar_path, sidecar_content)
-                    if verbose:
-                        print(f"    Sidecar: {os.path.basename(sidecar_path)}")
 
-    # 5. Collect snapshot VRTs (backscatter multi-pol VRTs, not TS/mosaic)
-    import re as _re
-    _snap_pol_re = _re.compile(r"-EBD_[A-Za-z]_([a-zA-Z]{3,})_[^_]+\.vrt$")
-    ts_and_combined = set(per_track_vrts + combined_vrts)
-    all_dir_vrts = _list_vrts_in_dir(out_dir, output_fs)
-    snapshot_vrts = [
-        p for p in all_dir_vrts
-        if p not in ts_and_combined
-        and not p.endswith("_mosaic.vrt")
-        and _snap_pol_re.search(os.path.basename(p))
-    ]
+        # --- Phase 2: Single-date multi-pol VRTs (backscatter only) ---
+        if category == "backscatter" and date_pol_sources:
+            # Group by date (merge across nisar_base variants for same date)
+            by_date = defaultdict(list)
+            for (_base, date), pol_paths in date_pol_sources.items():
+                by_date[date].extend(pol_paths)
 
-    _print_vrt_summary(output_path, snapshot_vrts, per_track_vrts, combined_vrts,
-                       ancillary_tifs=ancillary_tifs, mosaic_vrts=mosaic_vrt_paths)
+            for date, pol_paths in sorted(by_date.items()):
+                # Deduplicate and sort by pol_str
+                seen = set()
+                unique = []
+                for path, pstr in pol_paths:
+                    if path not in seen:
+                        seen.add(path)
+                        unique.append((path, pstr))
+                # Only build multi-pol VRT when >1 polarization
+                if len(unique) > 1:
+                    unique.sort(key=lambda x: x[1])
+                    band_files = [p for p, _ in unique]
+                    band_names = [ps for _, ps in unique]
+                    ref_geo = _read_tif_geo(band_files[0], output_fs)
+                    if ref_geo:
+                        tf, w, h, crs_w, dt = ref_geo
+                        pol_list_str = "".join(band_names)
+                        ebd = f"-EBD_{frequency}_{pol_list_str}_{mode_str}.vrt"
+                        # Derive VRT name from the first source file
+                        src_base = os.path.basename(band_files[0])
+                        if "-EBD_" in src_base:
+                            vrt_name = src_base.split("-EBD_")[0] + ebd
+                        else:
+                            vrt_name = src_base.replace(".tif", "") + ebd
+                        vrt_path = f"{out_dir}/{vrt_name}"
+                        vrt_xml = nisar_tools.generate_vrt_xml_single_step(
+                            w, h, tf, crs_w, band_files, band_names, date, dtype=dt)
+                        write_vrt(vrt_path, vrt_xml)
+                        summary["backscatter"]["single_dates"].append(vrt_path)
+
+    _print_vrt_summary(output_path, summary)
 
 
 def processing(args):
@@ -706,10 +724,6 @@ def processing(args):
     # 2b. Logic: Rebuild Only (Immediate Exit)
     if args.rebuild_only:
         print(f"Rebuilding VRTs in {args.output}...")
-        # Rebuild per-date snapshot VRTs only (time-series handled by build_track_vrts below)
-        res = nisar_tools.rebuild_vrts(output_path=args.output, variable_names=args.vars, transform_mode=args.mode, frequency=args.freq, auth_config=output_auth, verbose=args.verbose, build_ts=False)
-        print(res)
-        print("\nBuilding per-track time series VRTs...")
         build_track_vrts(
             output_path=args.output,
             frequency=args.freq,
@@ -781,9 +795,14 @@ def processing(args):
 
         # 6. Conditional Rebuild (Post-Processing)
         if args.rebuild_all_vrts:
-            print(f"\n[Triggered] Rebuilding snapshot VRTs in {args.output} to include new timesteps...")
-            rebuild_res = nisar_tools.rebuild_vrts(output_path=args.output, variable_names=args.vars, transform_mode=args.mode, frequency=args.freq, auth_config=output_auth, verbose=args.verbose, build_ts=False)
-            print(rebuild_res)
+            print(f"\nRebuilding all VRTs in {args.output} to include all timesteps...")
+            build_track_vrts(
+                output_path=args.output,
+                frequency=args.freq,
+                mode_str=args.mode if args.mode else "pwr",
+                verbose=args.verbose,
+                output_auth=output_auth,
+            )
 
     except Exception as e:
         print(f"\nCRITICAL FAILURE: {e}")
