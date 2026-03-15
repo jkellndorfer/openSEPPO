@@ -709,19 +709,16 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
                         unique.append((path, pstr))
                 # Only build multi-pol VRT when >1 polarization
                 if len(unique) > 1:
-                    unique.sort(key=lambda x: x[1])
+                    # Band order: likepol (hh/vv), crosspol (hv/vh), ratio last
+                    _pol_order = {"hh": 0, "vv": 0, "hv": 1, "vh": 1,
+                                  "hhhvra": 2, "vvvhra": 2}
+                    unique.sort(key=lambda x: (_pol_order.get(x[1], 1), x[1]))
                     band_files = [p for p, _ in unique]
                     band_names = [ps for _, ps in unique]
                     ref_geo = _read_tif_geo(band_files[0], output_fs)
                     if ref_geo:
                         tf, w, h, crs_w, dt, _nd = ref_geo
-                        # If a ratio band is present (hhhvra / vvvhra), use its
-                        # name as the composite -- it already encodes all bands.
-                        _ratio = [n for n in band_names if n in ("hhhvra", "vvvhra")]
-                        if _ratio:
-                            pol_list_str = _ratio[0]
-                        else:
-                            pol_list_str = "".join(band_names)
+                        pol_list_str = "".join(band_names)
                         ebd = f"-EBD_{frequency}_{pol_list_str}_{mode_str}.vrt"
                         # Derive VRT name from the first source file
                         src_base = os.path.basename(band_files[0])
