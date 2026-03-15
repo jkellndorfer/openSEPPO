@@ -580,7 +580,8 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
         return (meta, geo)
 
     all_metas = []
-    with ThreadPoolExecutor(max_workers=min(len(parsed), os.cpu_count() or 4, 16)) as pool:
+    _n_workers = min(len(parsed), 48)
+    with ThreadPoolExecutor(max_workers=_n_workers) as pool:
         for meta, geo in pool.map(_read_one, parsed):
             if geo is None:
                 continue
@@ -628,8 +629,8 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
         for m in cat_metas:
             by_pol[m["pol_str"]].append(m)
 
-        # Phase 2 collector: date -> list of (path, pol_str) for multi-pol VRTs
-        # Key: (nisar_base_prefix, date) -> [(path_or_mosaic, pol_str)]
+        # Phase 2 collector: per-track per-date sources for multi-pol VRTs
+        # Key: (track, direction, date) -> [(path, pol_str, mode_str)]
         date_pol_sources = defaultdict(list)
 
         for pol_str, pol_metas in sorted(by_pol.items()):
@@ -681,7 +682,7 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
                               "nodata": m0.get("nodata")}
                         mosaic_items.append(mi)
                         if category == "backscatter":
-                            date_pol_sources[(m0["nisar_base"], mi["date"])].append((mosaic_path, pol_str, _ms))
+                            date_pol_sources[(track, direction, mi["date"])].append((mosaic_path, pol_str, _ms))
 
                     track_dir_ts[(track, direction)] = {"ts_items": mosaic_items, "metas": td_metas}
 
@@ -698,7 +699,7 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
                         ts_items.append(ti)
                         # Track TIF for potential multi-pol VRT (backscatter)
                         if category == "backscatter":
-                            date_pol_sources[(m["nisar_base"], ti["date"])].append((m["path"], pol_str, _ms))
+                            date_pol_sources[(track, direction, ti["date"])].append((m["path"], pol_str, _ms))
                         # Add raw TIF to single_dates (replaced by VRT in Phase 2 if applicable)
                         summary[category]["single_dates"].append(m["path"])
 
@@ -743,14 +744,9 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
                     sidecar_path = combined_path[:-4] + "_track_frames.txt"
                     write_vrt(sidecar_path, sidecar_content)
 
-        # --- Phase 2: Single-date multi-pol VRTs (backscatter only) ---
+        # --- Phase 2: Single-date multi-pol VRTs (backscatter only, per track) ---
         if category == "backscatter" and date_pol_sources:
-            # Group by date (merge across nisar_base variants for same date)
-            by_date = defaultdict(list)
-            for (_base, date), pol_paths in date_pol_sources.items():
-                by_date[date].extend(pol_paths)
-
-            for date, pol_paths in sorted(by_date.items()):
+            for (_trk, _dir, date), pol_paths in sorted(date_pol_sources.items()):
                 # Deduplicate and sort by pol_str
                 seen = set()
                 unique = []
