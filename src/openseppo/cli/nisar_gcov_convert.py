@@ -128,6 +128,7 @@ def myargsparse(a):
     # --- Management Flags ---
     parser.add_argument("-ro", "--rebuild_only", action="store_true", help="Skip processing and ONLY rebuild VRTs in the output folder.")
     parser.add_argument("-S", "--show_vrts", action="store_true", help="Print a summary of all VRTs and TIFs in the output folder (requires -o). No processing is performed.")
+    parser.add_argument("-vsis3", "--vsis3", action="store_true", help="With -S: print paths as /vsis3/ URIs for direct use in QGIS/GDAL.")
     parser.add_argument("-cache", "--cache", default=None, action="store", help="Local path to a directory to cache files from urls first. Accepts 'y' or 'yes' to create a local temp directory (on /dev/shm or /tmp if available).")
     parser.add_argument("-keep", "--keep_cached", action="store_true", help="Use with -cache to keep to cached h5 file locally.")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output.")
@@ -474,7 +475,7 @@ def _green(text):
     return text
 
 
-def _print_vrt_summary(output_path, summary):
+def _print_vrt_summary(output_path, summary, vsis3=False):
     """Print a structured VRT/TIF summary for copy-paste into a GIS application.
 
     *summary* is a dict with keys "backscatter" and "ancillary", each mapping
@@ -483,15 +484,24 @@ def _print_vrt_summary(output_path, summary):
         "mosaics"       -- list of paths (spatial mosaic VRTs)
         "ts_by_track"   -- list of paths (per-track time-series VRTs)
         "combined_ts"   -- list of paths (multi-track combined VRTs)
+    If *vsis3* is True, S3 paths are printed as /vsis3/ URIs for QGIS/GDAL.
     """
     is_s3 = output_path.startswith("s3://")
     if is_s3:
         bucket = output_path.replace("s3://", "").split("/")[0]
-        print(f"\n{_green('---> Bucket:')}")
-        print(bucket)
+        if vsis3:
+            print(f"\n{_green('---> /vsis3/ Path:')}")
+            print(f"/vsis3/{output_path[5:].rstrip('/')}")
+        else:
+            print(f"\n{_green('---> Bucket:')}")
+            print(bucket)
 
-        def key(p):
-            return p.replace("s3://", "").split("/", 1)[1]
+        if vsis3:
+            def key(p):
+                return "/vsis3/" + p[5:] if p.startswith("s3://") else p
+        else:
+            def key(p):
+                return p.replace("s3://", "").split("/", 1)[1]
     else:
         print(f"\n{_green('---> Path:')}")
         print(output_path.rstrip("/"))
@@ -528,7 +538,7 @@ def _print_vrt_summary(output_path, summary):
         print(output_path.rstrip("/"))
 
 
-def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_auth=None):
+def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_auth=None, vsis3=False):
     """
     Post-process: build VRTs in four phases, then print a structured summary.
 
@@ -639,7 +649,7 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
         print(f"  WARNING: mixed radiometry found ({_radiometries}). "
               f"Cannot build VRTs from inconsistent data. "
               f"Reprocess with a single radiometry setting.", file=sys.stderr)
-        _print_vrt_summary(output_path, summary={"backscatter": {}, "ancillary": {}})
+        _print_vrt_summary(output_path, summary={"backscatter": {}, "ancillary": {}}, vsis3=vsis3)
         return
 
     # Extract VRT-level metadata from the first backscatter TIF's tags
@@ -837,7 +847,7 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
                         summary["backscatter"]["single_dates"].append(vrt_path)
 
     _sync_vrts_to_s3()
-    _print_vrt_summary(output_path, summary)
+    _print_vrt_summary(output_path, summary, vsis3=vsis3)
 
 
 def processing(args):
@@ -853,6 +863,7 @@ def processing(args):
             mode_str=None,  # auto-detect from existing TIFs
             verbose=False,
             output_auth=output_auth,
+            vsis3=args.vsis3,
         )
         return
 
