@@ -1,7 +1,7 @@
 """
-openseppo.nisar.nisar_tools — NISAR GCOV processing core
+openseppo.nisar.nisar_tools -- NISAR GCOV processing core
 *********************************************************
-openSEPPO — Open SEPPO Tools
+openSEPPO -- Open SEPPO Tools
 Supporting Geospatial and Remote Sensing Data Processing
 
 (c) 2026 Earth Big Data LLC  |  https://earthbigdata.com
@@ -18,6 +18,7 @@ dual-pol ratio computation.
 
 import sys
 import os
+import gc
 import atexit
 import tempfile
 import shutil
@@ -111,7 +112,7 @@ def _earthaccess_login(verbose=False):
         bypassing Store.__init__ (which runs a ~75 s OAuth cookie handshake).
 
         earthaccess.open() for HTTPS uses Store.get_fsspec_session(), which only
-        needs the bearer token — no OAuth cookies required.
+        needs the bearer token -- no OAuth cookies required.
         """
         from earthaccess.store import Store
 
@@ -126,7 +127,7 @@ def _earthaccess_login(verbose=False):
         store._s3_credentials = {}
         store._requests_cookies = {}
         store.in_region = False
-        # _http_session is created lazily by get_session() — no network call.
+        # _http_session is created lazily by get_session() -- no network call.
         store._http_session = auth.get_session()
         earthaccess._store = store
 
@@ -225,7 +226,7 @@ def _ensure_utm_south(crs_str, h5_handle):
     """
     s = str(crs_str).strip()
     if "+proj=utm" not in s.lower():
-        return s  # Not a UTM proj4 string — nothing to fix
+        return s  # Not a UTM proj4 string -- nothing to fix
     if "+south" in s.lower():
         return s  # Already hemisphere-aware
     try:
@@ -247,7 +248,7 @@ def _ensure_utm_south(crs_str, h5_handle):
 
 
 def _parse_crs(crs_input):
-    """Normalise EPSG string / int / WKT / CRS object → rasterio CRS."""
+    """Normalise EPSG string / int / WKT / CRS object -> rasterio CRS."""
     if crs_input is None:
         return None
     if isinstance(crs_input, CRS):
@@ -257,7 +258,7 @@ def _parse_crs(crs_input):
     s = str(crs_input).strip()
     if s.upper().startswith("EPSG:"):
         return CRS.from_epsg(int(s.split(":")[1]))
-    # Bare numeric string → treat as EPSG code (e.g. "32634" → EPSG:32634)
+    # Bare numeric string -> treat as EPSG code (e.g. "32634" -> EPSG:32634)
     if s.isdigit():
         return CRS.from_epsg(int(s))
     try:
@@ -283,7 +284,7 @@ def _get_resampling(method):
 
 def _fill_nodata_nn(data_2d):
     """
-    Fill interior NaN / ±inf pixels with the value of their nearest valid neighbour.
+    Fill interior NaN / +/-inf pixels with the value of their nearest valid neighbour.
 
     Only pixels not connected to the image-frame edge are filled.  Edge-connected
     invalid regions (layover, shadow, swath gaps that reach the frame boundary)
@@ -313,75 +314,45 @@ def _reproject_power_band(data_2d, src_transform, src_crs, dst_transform, dst_cr
                            dst_width, dst_height, resampling, fill_holes=False,
                            num_threads=None):
     """
-    Warp one 2-D float32 power array. NaN/±inf ↔ NaN nodata. Returns warped array.
+    Warp one 2-D float32 power array. NaN/+/-inf <-> NaN nodata. Returns warped array.
 
-    Two-pass approach to avoid introducing extra NaN pixels:
+    Single-pass warp with src_nodata=NaN. GDAL 3.x+ correctly excludes NaN
+    from cubic/lanczos kernels, preserving edge nodata without the memory-heavy
+    scipy distance_transform + second mask warp that the old two-pass approach
+    required.
 
-    Pass 1 — warp the data with invalid pixels (NaN/±inf) replaced by their
-              nearest valid neighbour value (NN fill) and src_nodata=None.
-              Using NN-filled values instead of 0 prevents the resampling
-              kernel from mixing valid data with zeros near NaN boundaries,
-              which would otherwise produce floor-clamped artefacts (e.g.
-              -40 dB) at swath edges.  With no declared source nodata GDAL
-              clamps out-of-bounds kernel taps to the nearest edge pixel
-              rather than treating them as NaN.
-
-    Pass 2 — warp a binary valid-pixel mask using nearest-neighbour resampling
-              so each output pixel inherits the validity of its nearest source
-              pixel with no kernel spreading.  Edge-connected NaN regions are
-              correctly restored to NaN in the output regardless of the Pass 1
-              fill, because the mask is derived from the original invalid pattern.
-
-    fill_holes — if True, interior NaN/±inf pixels (those fully enclosed by
+    fill_holes -- if True, interior NaN/+/-inf pixels (those fully enclosed by
                  valid data, not connected to the image frame edge) are filled
                  with their nearest valid neighbour BEFORE warping so they
-                 remain valid in the output.  Frame-boundary nodata is
-                 unaffected and still propagates to NaN in the output.
+                 remain valid in the output. Uses scipy (higher memory); only
+                 runs when the user explicitly requests --fill_holes.
+                 Frame-boundary nodata is unaffected.
     """
-    from scipy.ndimage import distance_transform_edt
-
     src = data_2d.astype(np.float32)
+    src[~np.isfinite(src)] = np.nan
 
     if fill_holes:
         src = _fill_nodata_nn(src)
 
-    invalid = ~np.isfinite(src)          # NaN and ±inf
-    valid = (~invalid).astype(np.float32)
-
-    # Fill ALL invalid pixels with their nearest valid neighbour for pass 1.
-    # This gives the resampling kernel physically meaningful values instead of
-    # zeros, preventing floor-clamped artefacts at swath/image boundaries.
-    if invalid.any():
-        row_idx, col_idx = distance_transform_edt(
-            invalid, return_distances=False, return_indices=True)
-        filled = src.copy()
-        filled[invalid] = src[row_idx[invalid], col_idx[invalid]]
-    else:
-        filled = src
-
     n_threads = num_threads if num_threads is not None else os.cpu_count() or 1
 
-    kw = dict(src_transform=src_transform, src_crs=src_crs,
-              dst_transform=dst_transform, dst_crs=dst_crs,
-              src_nodata=None, num_threads=n_threads)
-
     dst_data = np.full((dst_height, dst_width), np.nan, dtype=np.float32)
-    dst_mask = np.zeros((dst_height, dst_width), dtype=np.float32)
 
-    reproject(source=filled, destination=dst_data,
-              resampling=resampling, dst_nodata=np.nan, **kw)
-    reproject(source=valid, destination=dst_mask,
-              resampling=Resampling.nearest, dst_nodata=0.0, **kw)
+    reproject(
+        source=src, destination=dst_data,
+        src_transform=src_transform, src_crs=src_crs,
+        dst_transform=dst_transform, dst_crs=dst_crs,
+        src_nodata=np.nan, dst_nodata=np.nan,
+        resampling=resampling,
+        num_threads=n_threads,
+    )
 
-    dst_data[dst_mask == 0] = np.nan
+    del src
+    gc.collect()
 
-    # Cubic/lanczos ringing near high-contrast boundaries can produce negative
-    # or ±inf power values.  Clamp to a physically meaningful power range:
-    #   floor : -40 dB  → 10^(-4)
-    #   ceil  : 13.329 dB → 10^(13.329/10)
-    # np.where propagates NaN, so image-edge NaN pixels are unaffected.
-    _PWR_FLOOR = 10 ** (-40.0 / 10.0)        # 1e-4
-    _PWR_CEIL  = 10 ** (13.329 / 10.0)       # ~21.53
+    # Clamp to physically meaningful power range (cubic/lanczos ringing).
+    _PWR_FLOOR = 1e-4                        # -40 dB
+    _PWR_CEIL = 10 ** (13.329 / 10.0)        # ~21.53
     finite = np.isfinite(dst_data)
     dst_data = np.where(finite, np.clip(dst_data, _PWR_FLOOR, _PWR_CEIL), dst_data)
 
@@ -495,6 +466,104 @@ def recommend_ec2_instance(width, height, num_bands=1, downscale_factor=1):
 # =========================================================
 
 
+# -- Ancillary grid handling ---------------------------------------------------
+# Maps HDF5 variable name -> (suffix, downscale, warp_resampling, out_dtype, nodata).
+# Variables not in this dict are treated as backscatter (power) data.
+_ANCILLARY_GRIDS = {
+    "mask":                    ("mask",        "mask_priority", "nearest", "uint8",   255),
+    "numberOfLooks":           ("nlooks",      "sum",           "sum",     "float32", np.nan),
+    "rtcGammaToSigmaFactor":   ("gamma2sigma", "mean",          "average", "float32", np.nan),
+}
+
+
+def _is_ancillary(var):
+    """Return True if *var* is a known ancillary grid (not backscatter)."""
+    return var in _ANCILLARY_GRIDS
+
+
+def _ancillary_suffix(var):
+    """Return the short output filename token for an ancillary grid."""
+    return _ANCILLARY_GRIDS[var][0]
+
+
+def _ancillary_downscale_method(var):
+    return _ANCILLARY_GRIDS[var][1]
+
+
+def _ancillary_warp_resampling(var):
+    return _ANCILLARY_GRIDS[var][2]
+
+
+def _ancillary_out_dtype(var):
+    return _ANCILLARY_GRIDS[var][3]
+
+
+def _ancillary_nodata(var):
+    return _ANCILLARY_GRIDS[var][4]
+
+
+def _downscale_block(data_3d, factor, method="mean"):
+    """Block-downscale a (1, H, W) array using the given aggregation.
+
+    Methods:
+        mean           -- nanmean  (power, gamma2sigma)
+        sum            -- nansum   (numberOfLooks)
+        mask_priority  -- NISAR mask: 255 (fill) > 0 (invalid) > subswath (valid)
+    """
+    _, h, w = data_3d.shape
+    new_h = h - (h % factor)
+    new_w = w - (w % factor)
+    if new_h == 0 or new_w == 0:
+        raise ValueError(f"Downscale factor {factor} larger than image ({w}x{h}).")
+    cropped = data_3d[:, :new_h, :new_w]
+    reshaped = cropped.reshape(1, new_h // factor, factor, new_w // factor, factor)
+
+    if method == "mask_priority":
+        # Vectorised priority: 255 (fill) > 0 (invalid) > subswath value.
+        # NaN (from float32 read) is treated as fill (255).
+        # Two reductions (max + min) instead of boolean array creation.
+        int_view = np.nan_to_num(reshaped, nan=255.0).astype(np.uint8)
+        max_val = np.max(int_view, axis=(2, 4))
+        min_val = np.min(int_view, axis=(2, 4))
+        result = np.where(max_val == 255, np.uint8(255),
+                 np.where(min_val == 0, np.uint8(0), max_val))
+        return result.astype(np.float32)  # (1, new_h, new_w) — preserves input band dim
+
+    with np.errstate(invalid="ignore"):
+        if method == "sum":
+            result = np.nansum(reshaped, axis=(2, 4))
+            # nansum returns 0 for all-NaN blocks; restore NaN for nodata regions
+            all_nan = np.all(np.isnan(reshaped), axis=(2, 4))
+            result[all_nan] = np.nan
+            return result.astype(np.float32)
+        return np.nanmean(reshaped, axis=(2, 4)).astype(np.float32)
+
+
+def _reproject_ancillary_band(data_2d, src_transform, src_crs, dst_transform,
+                               dst_crs, dst_width, dst_height, resample_name,
+                               num_threads=None):
+    """Warp one ancillary 2-D array with a single-pass reproject.
+
+    Unlike the two-pass power warp, ancillary grids use a straightforward
+    reproject: nearest for mask, sum for nlooks, average for gamma2sigma.
+    """
+    n_threads = num_threads if num_threads is not None else os.cpu_count() or 1
+    resample_enum = getattr(Resampling, resample_name, Resampling.nearest)
+
+    src = data_2d.astype(np.float32)
+    dst = np.full((dst_height, dst_width), np.nan, dtype=np.float32)
+
+    reproject(
+        source=src, destination=dst,
+        src_transform=src_transform, src_crs=src_crs,
+        dst_transform=dst_transform, dst_crs=dst_crs,
+        src_nodata=np.nan, dst_nodata=np.nan,
+        resampling=resample_enum,
+        num_threads=n_threads,
+    )
+    return dst
+
+
 def perform_downscaling(data_stack, factor):
     if factor is None or factor <= 1:
         return data_stack
@@ -532,23 +601,26 @@ def get_gdal_dtype(numpy_dtype):
     return "Float32"
 
 
-def generate_vrt_xml_single_step(width, height, transform, crs_wkt, band_files, band_names, date_str, dtype="UInt16", nodata=None):
-    vrt_dtype = get_gdal_dtype(dtype)
+def _vrt_metadata_xml(metadata, indent="  "):
+    """Build a <Metadata> block from a dict of key/value pairs."""
+    if not metadata:
+        return ""
+    lines = [f"{indent}<Metadata>"]
+    for k, v in metadata.items():
+        lines.append(f'{indent}  <MDI key="{k}">{v}</MDI>')
+    lines.append(f"{indent}</Metadata>")
+    return "\n".join(lines)
 
-    # --- 1. Determine NoData Value ---
-    if nodata is not None:
-        nodata_val = str(nodata)
-    else:
-        # Heuristic: Integers use 0, Floats use nan
-        # Check against the input dtype string (e.g., 'uint16', 'float32', 'Byte')
-        d_str = str(dtype).lower()
-        if "int" in d_str or "byte" in d_str:
-            nodata_val = "0"
-        else:
-            nodata_val = "nan"
+
+def generate_vrt_xml_single_step(width, height, transform, crs_wkt, band_files, band_names, date_str, dtype="UInt16", nodata=None, metadata=None):
+    vrt_dtype = get_gdal_dtype(dtype)
+    nodata_val = _format_nodata_val(nodata, dtype)
 
     geo_transform = f"{transform.c}, {transform.a}, {transform.b}, {transform.f}, {transform.d}, {transform.e}"
     xml = [f'<VRTDataset rasterXSize="{width}" rasterYSize="{height}">', f'  <SRS dataAxisToSRSAxisMapping="1,2">{crs_wkt}</SRS>', f"  <GeoTransform>{geo_transform}</GeoTransform>"]
+    ds_meta = _vrt_metadata_xml(metadata)
+    if ds_meta:
+        xml.append(ds_meta)
     for i, (fpath, bname) in enumerate(zip(band_files, band_names)):
         if fpath.startswith("s3://"):
             bucket, key = fpath.replace("s3://", "").split("/", 1)
@@ -574,24 +646,30 @@ def generate_vrt_xml_single_step(width, height, transform, crs_wkt, band_files, 
     return "\n".join(xml)
 
 
-def generate_vrt_xml_timeseries(width, height, transform, crs_wkt, stack_items, dtype="UInt16", nodata=None):
-    vrt_dtype = get_gdal_dtype(dtype)
-
-    # --- 1. Determine NoData Value ---
+def _format_nodata_val(nodata, dtype):
+    """Format nodata for VRT XML: int when possible, 'nan' for NaN, heuristic fallback."""
     if nodata is not None:
-        nodata_val = str(nodata)
-    else:
-        # Heuristic: Integers use 0, Floats use nan
-        # Check against the input dtype string (e.g., 'uint16', 'float32', 'Byte')
-        d_str = str(dtype).lower()
-        if "int" in d_str or "byte" in d_str:
-            nodata_val = "0"
-        else:
-            nodata_val = "nan"
+        try:
+            import math
+            if math.isnan(nodata):
+                return "nan"
+        except (TypeError, ValueError):
+            pass
+        return str(int(nodata)) if nodata == int(nodata) else str(nodata)
+    d_str = str(dtype).lower()
+    return "0" if ("int" in d_str or "byte" in d_str) else "nan"
+
+
+def generate_vrt_xml_timeseries(width, height, transform, crs_wkt, stack_items, dtype="UInt16", nodata=None, metadata=None):
+    vrt_dtype = get_gdal_dtype(dtype)
+    nodata_val = _format_nodata_val(nodata, dtype)
 
     geo_transform = f"{transform.c}, {transform.a}, {transform.b}, {transform.f}, {transform.d}, {transform.e}"
 
     xml = [f'<VRTDataset rasterXSize="{width}" rasterYSize="{height}">', f'  <SRS dataAxisToSRSAxisMapping="1,2">{crs_wkt}</SRS>', f"  <GeoTransform>{geo_transform}</GeoTransform>"]
+    ds_meta = _vrt_metadata_xml(metadata)
+    if ds_meta:
+        xml.append(ds_meta)
 
     for i, item in enumerate(stack_items):
         fpath = item["path"]
@@ -628,11 +706,7 @@ def generate_vrt_xml_timeseries_union(crs_wkt, stack_items, dtype="Float32", nod
     All items must share the same CRS and pixel size.
     """
     vrt_dtype = get_gdal_dtype(dtype)
-    if nodata is not None:
-        nodata_val = str(nodata)
-    else:
-        d_str = str(dtype).lower()
-        nodata_val = "0" if ("int" in d_str or "byte" in d_str) else "nan"
+    nodata_val = _format_nodata_val(nodata, dtype)
 
     res_x = abs(stack_items[0]["transform"].a)
     res_y = abs(stack_items[0]["transform"].e)
@@ -703,7 +777,9 @@ def construct_timeseries_filename(sample_h5_url, min_date, max_date, frequency, 
         new_base = basename.replace(match.group(0), new_time_str)
     else:
         new_base = f"NISAR_TS_{min_date.replace('-', '')}_{max_date.replace('-', '')}"
-    return f"{new_base}-EBD_{frequency}_{pol}_{mode_str}.vrt"
+    if mode_str:
+        return f"{new_base}-EBD_{frequency}_{pol}_{mode_str}.vrt"
+    return f"{new_base}-EBD_{frequency}_{pol}.vrt"
 
 
 # =========================================================
@@ -716,7 +792,7 @@ def _write_h5_subset(src_f, grid_path, variable_names, col, row, w, h):
     Return bytes of a proper NetCDF-4/HDF5 subset file openable by GDAL's
     NETCDF: driver.  Uses the netCDF4 library so that named dimensions,
     _Netcdf4Dimid, _NCProperties and grid_mapping are all written correctly.
-    Avoids h5py.copy() — only targeted range reads are issued against src_f.
+    Avoids h5py.copy() -- only targeted range reads are issued against src_f.
     """
     try:
         import netCDF4 as nc_lib
@@ -748,7 +824,7 @@ def _write_h5_subset(src_f, grid_path, variable_names, col, row, w, h):
     try:
         with nc_lib.Dataset(tmp_path, "w", format="NETCDF4") as dst:
 
-            # Global attributes (skip _NC* — managed by netCDF4 library)
+            # Global attributes (skip _NC* -- managed by netCDF4 library)
             _cpattrs(src_f, dst)
 
             # Build group hierarchy and copy per-group attributes
@@ -806,7 +882,7 @@ def _write_h5_subset(src_f, grid_path, variable_names, col, row, w, h):
                           stdout=sp.DEVNULL, stderr=sp.DEVNULL)
             read_path = tmp_repacked
         except Exception:
-            read_path = tmp_path  # h5repack unavailable — use original
+            read_path = tmp_path  # h5repack unavailable -- use original
 
         with open(read_path, "rb") as fh:
             return fh.read()
@@ -877,7 +953,7 @@ def cache_to_local(url, localdir=None, keep=False, use_earthdata=False, fs=None)
     if url.startswith("https://"):
         _download_https(url, local_path, localdir, use_earthdata=use_earthdata)
     elif url.startswith("s3://"):
-        # s3:// — use aws cli (with optional earthdata S3 credentials)
+        # s3:// -- use aws cli (with optional earthdata S3 credentials)
         env = os.environ.copy()
         if use_earthdata:
             auth = earthaccess.login(strategy="netrc")
@@ -888,7 +964,7 @@ def cache_to_local(url, localdir=None, keep=False, use_earthdata=False, fs=None)
         cmd = f"aws s3 cp {url} {localdir}"
         sp.check_call(shlex.split(cmd), env=env)
     else:
-        # local file into an explicit cache dir — symlink
+        # local file into an explicit cache dir -- symlink
         os.symlink(os.path.abspath(url), local_path)
 
     print("done")
@@ -911,7 +987,7 @@ def _download_https(url, local_path, localdir, use_earthdata=False):
             if resp.status_code in (302, 303):
                 download_url = resp.headers["Location"]
             else:
-                # Could not resolve presigned URL — fall back to earthaccess
+                # Could not resolve presigned URL -- fall back to earthaccess
                 earthaccess.login(strategy="netrc")
                 earthaccess.download([url], localdir)
                 return
@@ -1102,7 +1178,7 @@ def open_datatree_lazy(path, s3_fs, verbose=False, block_size=16 * 1024 * 1024):
     if path.startswith("https://") or path.startswith("s3://"):
         return None
 
-    # Local files only — open directly by path
+    # Local files only -- open directly by path
     try:
         try:
             dt = open_datatree(path, engine="h5netcdf", phony_dims="sort", decode_timedelta=False)
@@ -1306,13 +1382,23 @@ def inspect_h5_structure(f):
                     poly_native_display = f"Reprojection Failed: {e}"
 
             variables = []
+            var_details = {}  # name -> {"dtype": str, "nodata": str}
             for item in f[g_path].keys():
                 if item not in ["projection", "xCoordinates", "yCoordinates", "listOfPolarizations", "covarianceMatrixDiagonal", "covarianceMatrixOffDiagonal"]:
                     obj = f[f"{g_path}/{item}"]
                     if isinstance(obj, h5py.Dataset) and len(obj.shape) >= 2:
                         variables.append(item)
+                        _dt = str(obj.dtype)
+                        # Prefer explicit _FillValue attribute over h5py's
+                        # .fillvalue (which returns the HDF5 dtype default).
+                        if "_FillValue" in obj.attrs:
+                            _fv = obj.attrs["_FillValue"]
+                            _fv_str = str(_fv)
+                        else:
+                            _fv_str = "none"
+                        var_details[item] = {"dtype": _dt, "nodata": _fv_str}
 
-            structure[freq_code] = {"crs": crs, "ncols": ncols, "nrows": nrows, "res_x": float(res_x), "res_y": float(res_y), "bbox": (min_x, min_y, max_x, max_y), "vars": sorted(variables), "poly_geo": poly_geo_display, "poly_native": poly_native_display, "dims": dims_km}
+            structure[freq_code] = {"crs": crs, "ncols": ncols, "nrows": nrows, "res_x": float(res_x), "res_y": float(res_y), "bbox": (min_x, min_y, max_x, max_y), "vars": sorted(variables), "var_details": var_details, "poly_geo": poly_geo_display, "poly_native": poly_native_display, "dims": dims_km}
         except Exception as e:
             structure[freq_code] = {"error": str(e)}
 
@@ -1331,7 +1417,7 @@ def get_grid_info(h5_handle, frequency="A"):
         projection = _ensure_utm_south(proj_val.decode(), h5_handle)
     else:
         projection = f"EPSG:{proj_val}"
-    # NISAR grids are uniformly spaced — only read the first two values plus
+    # NISAR grids are uniformly spaced -- only read the first two values plus
     # dataset shape to get resolution and extent without fetching the full arrays.
     nx = x_ds.shape[0]
     ny = y_ds.shape[0]
@@ -1375,29 +1461,75 @@ def get_grid_info_from_datatree(dt, frequency="A"):
         return None
 
 
+def _decode_h5_scalar(val):
+    """Decode an HDF5 / xarray scalar to a clean Python str.
+
+    Handles np.bytes_, bytes, numpy 0-d arrays, and plain strings.
+    """
+    # Unwrap 0-d numpy arrays (from xarray .values on scalar datasets)
+    if isinstance(val, np.ndarray) and val.ndim == 0:
+        val = val.item()
+    if isinstance(val, (bytes, np.bytes_)):
+        return val.decode()
+    return str(val)
+
+
 def get_acquisition_metadata_from_datatree(dt):
     """Read acquisition metadata from an open datatree, avoiding a second S3 file open."""
     try:
         node = dt["science/LSAR/identification"]
         ds = node.ds
-        t_start = ds["zeroDopplerStartTime"].values
-        t_start = t_start.decode() if hasattr(t_start, "decode") else str(t_start)
+        t_start = _decode_h5_scalar(ds["zeroDopplerStartTime"].values)
+        meta = {}
         if "T" in t_start:
             date_part, time_part = t_start.split("T")
-            return {"ACQUISITION_DATE": date_part, "ACQUISITION_TIME": time_part}
-        return {"ACQUISITION_DATETIME": t_start}
+            meta["ACQUISITION_DATE"] = date_part
+            meta["ACQUISITION_TIME"] = time_part
+        else:
+            meta["ACQUISITION_DATETIME"] = t_start
+        # CRID
+        try:
+            meta["CRID"] = _decode_h5_scalar(ds["compositeReleaseID"].values)
+        except Exception:
+            pass
+        # ISCE3 / software version
+        try:
+            sw = dt["science/LSAR/GCOV/metadata/processingInformation/algorithms"].ds
+            meta["ISCE3_VERSION"] = _decode_h5_scalar(sw["softwareVersion"].values)
+        except Exception:
+            pass
+        return meta
     except Exception:
         return None
 
 
 def get_acquisition_metadata(h5_handle):
     try:
-        t_start = h5_handle["/science/LSAR/identification/zeroDopplerStartTime"][()]
-        t_start = t_start.decode() if hasattr(t_start, "decode") else str(t_start)
+        t_start = _decode_h5_scalar(
+            h5_handle["/science/LSAR/identification/zeroDopplerStartTime"][()]
+        )
+        meta = {}
         if "T" in t_start:
             date_part, time_part = t_start.split("T")
-            return {"ACQUISITION_DATE": date_part, "ACQUISITION_TIME": time_part}
-        return {"ACQUISITION_DATETIME": t_start}
+            meta["ACQUISITION_DATE"] = date_part
+            meta["ACQUISITION_TIME"] = time_part
+        else:
+            meta["ACQUISITION_DATETIME"] = t_start
+        # CRID
+        try:
+            meta["CRID"] = _decode_h5_scalar(
+                h5_handle["/science/LSAR/identification/compositeReleaseID"][()]
+            )
+        except Exception:
+            pass
+        # ISCE3 / software version
+        try:
+            meta["ISCE3_VERSION"] = _decode_h5_scalar(
+                h5_handle["/science/LSAR/GCOV/metadata/processingInformation/algorithms/softwareVersion"][()]
+            )
+        except Exception:
+            pass
+        return meta
     except Exception:
         return {}
 
@@ -1480,7 +1612,7 @@ def pwr_to_amp(pwr, scale_factor=10**8.3):
 # =========================================================
 
 
-def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, projwin, transform_mode, frequency, single_bands, vrt, downscale_factor, target_align_pixels, input_fs, output_fs, is_batch=False, cache=None, keep=False, use_earthdata=False, verbose=False, target_srs=None, target_res=None, resample="cubic", output_format="COG", fill_holes=False, num_threads=None, read_threads=8, dualpol_ratio=False):
+def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, projwin, transform_mode, frequency, single_bands, vrt, downscale_factor, target_align_pixels, input_fs, output_fs, is_batch=False, cache=None, keep=False, use_earthdata=False, verbose=False, target_srs=None, target_res=None, resample="cubic", output_format="COG", fill_holes=False, num_threads=None, read_threads=8, dualpol_ratio=False, sigma0=False):
 
     h5_basename = h5_url.split("/")[-1]
     base_name = h5_basename[:-3] if h5_basename.lower().endswith(".h5") else h5_basename
@@ -1561,6 +1693,22 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
             info = get_grid_info(f, frequency=frequency)
         if acq_meta is None:
             acq_meta = get_acquisition_metadata(f)
+
+        # Inject processing metadata into the tag dict.
+        # RADIOMETRY and DB_FORMULA are added per-band (backscatter only).
+        _radiometry = "sigma0" if sigma0 else "gamma0"
+        _db_formulas = {
+            "pwr": "dB = 10*log10(DN)",
+            "db":  "dB = DN",
+            "amp": "dB = 20*log10(DN) - 83",
+            "dn":  "dB = -31.15 + DN*0.15",
+        }
+        _db_formula = _db_formulas.get(logic_mode, "")
+        try:
+            from importlib.metadata import version as _pkg_version
+            acq_meta["OPENSEPPO_VERSION"] = _pkg_version("openseppo")
+        except Exception:
+            acq_meta["OPENSEPPO_VERSION"] = "unknown"
 
         if verbose:
             print(f"    [t] file open + metadata: {_time.perf_counter()-_t_file:.1f}s", flush=True)
@@ -1754,7 +1902,7 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
 
             _wb(h5_out_path, h5_bytes)
             if verbose:
-                print(f"    ✓ H5 subset: {os.path.basename(h5_out_path)}", flush=True)
+                print(f"    [OK] H5 subset: {os.path.basename(h5_out_path)}", flush=True)
             files_map_h5 = {var: h5_out_path for var in variable_names}
             return {"success": True, "h5_url": h5_url, "date": date_str,
                     "files_map": files_map_h5,
@@ -1763,7 +1911,22 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
         # MEMORY OPTIMIZATION: When using cache with single_bands, process one variable at a time
         # to reduce memory footprint (important for large files on smaller RAM).
         # dualpol_ratio requires both bands in memory simultaneously, so force normal mode.
+        # When dualpol_ratio is active, strip ancillary vars to avoid holding
+        # them in the full stack — process ancillary in a separate run.
+        if dualpol_ratio:
+            _dropped_anc = [v for v in variable_names if _is_ancillary(v)]
+            if _dropped_anc:
+                variable_names = [v for v in variable_names if not _is_ancillary(v)]
+                print(f"    Note: ancillary grids ({', '.join(_dropped_anc)}) skipped with -dpratio. "
+                      f"Process them in a separate run without -dpratio.", flush=True)
         use_low_memory_mode = (cache is not None and single_bands) and not dualpol_ratio
+
+        # Build the read list: append rtcGammaToSigmaFactor when --sigma0 is
+        # requested so it is fetched in the same parallel I/O pass (same
+        # spatial subset) as the covariance bands.
+        _sigma_var = "rtcGammaToSigmaFactor"
+        _sigma_already_in_vars = _sigma_var in variable_names
+        _read_vars = list(variable_names) + ([_sigma_var] if sigma0 and not _sigma_already_in_vars else [])
 
         if use_low_memory_mode:
             if verbose:
@@ -1771,37 +1934,70 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
             # Process each band separately to minimize memory usage
             bands_data = None  # Don't load all bands at once
             data_stack = None  # Will process one at a time
+
+            # Pre-read the sigma factor once so each band can be multiplied
+            # without re-reading it.  The file is already cached locally in
+            # low-memory mode, so this is a cheap local read.
+            if sigma0:
+                _sigma_data = _read_bands_parallel(
+                    file_url, input_fs, info["grid_path"],
+                    [_sigma_var], row, h, col, w, n_workers=read_threads,
+                )[0].astype(np.float32)
+                if verbose:
+                    print(f"    Read rtcGammaToSigmaFactor for sigma0 conversion", flush=True)
+            else:
+                _sigma_data = None
         else:
             if verbose:
-                print(f"    Extracting {len(variable_names)} bands...", flush=True)
+                print(f"    Extracting {len(_read_vars)} bands...", flush=True)
                 _t_read = _time.perf_counter()
 
             # For local files use datatree if available; for remote paths use
-            # parallel h5py reads (each band×stripe gets its own file handle and
-            # S3 connection, giving N×k concurrent range requests).
+            # parallel h5py reads (each bandxstripe gets its own file handle and
+            # S3 connection, giving Nxk concurrent range requests).
             _is_remote = file_url.startswith("s3://") or file_url.startswith("https://")
             if use_datatree and not _is_remote:
                 try:
                     row_slice = slice(row, row + h)
                     col_slice = slice(col, col + w)
-                    bands_data = read_variables_datatree(dt, info["grid_path"], variable_names, row_slice, col_slice)
+                    bands_data = read_variables_datatree(dt, info["grid_path"], _read_vars, row_slice, col_slice)
                     if verbose:
-                        print(f"    ✓ Used datatree for band extraction", flush=True)
+                        print(f"    [OK] Used datatree for band extraction", flush=True)
                 except Exception as e:
                     if verbose:
-                        print(f"    ⚠ Datatree read failed, falling back to parallel h5py: {e}", flush=True)
-                    bands_data = _read_bands_parallel(file_url, input_fs, info["grid_path"], variable_names, row, h, col, w, n_workers=read_threads)
+                        print(f"    [!] Datatree read failed, falling back to parallel h5py: {e}", flush=True)
+                    bands_data = _read_bands_parallel(file_url, input_fs, info["grid_path"], _read_vars, row, h, col, w, n_workers=read_threads)
             else:
-                bands_data = _read_bands_parallel(file_url, input_fs, info["grid_path"], variable_names, row, h, col, w, n_workers=read_threads)
+                bands_data = _read_bands_parallel(file_url, input_fs, info["grid_path"], _read_vars, row, h, col, w, n_workers=read_threads)
 
             # Take magnitude of off-diagonal (complex) GCOV elements before stacking
             # to avoid dtype promotion of the whole stack to complex.
             bands_data = [np.abs(b).astype(np.float32) if np.iscomplexobj(b) else b for b in bands_data]
+
+            # Extract and apply the sigma0 conversion factor before stacking.
+            # If the user included rtcGammaToSigmaFactor in --vars it stays in
+            # bands_data for output; if we appended it just for the conversion
+            # we remove it so it doesn't become an extra output band.
+            if sigma0:
+                if _sigma_already_in_vars:
+                    _sigma_data = bands_data[list(variable_names).index(_sigma_var)]
+                else:
+                    _sigma_data = bands_data.pop()
+                for i in range(len(bands_data)):
+                    if not _is_ancillary(_read_vars[i]):
+                        bands_data[i] = bands_data[i] * _sigma_data
+                del _sigma_data
+                gc.collect()
+                if verbose:
+                    print(f"    Applied rtcGammaToSigmaFactor (gamma0 -> sigma0)", flush=True)
+
             data_stack = np.stack(bands_data)
+            del bands_data
+            gc.collect()
             if verbose:
                 shape = data_stack.shape
                 mb = data_stack.nbytes / 1e6
-                print(f"    [t] data read ({shape[0]}×{shape[1]}×{shape[2]}, {mb:.1f} MB): {_time.perf_counter()-_t_read:.1f}s", flush=True)
+                print(f"    [t] data read ({shape[0]}x{shape[1]}x{shape[2]}, {mb:.1f} MB): {_time.perf_counter()-_t_read:.1f}s", flush=True)
                 _t_file = _time.perf_counter()
 
         x_center = info["x"][col]
@@ -1910,7 +2106,7 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
         _driver = "GTiff" if output_format.upper() == "GTIFF" else "COG"
         _gtiff_extra = {"bigtiff": "YES"} if _driver == "GTiff" else {}
         _n_th = str(num_threads) if num_threads is not None else "ALL_CPUS"
-        # PREDICTOR: 3=floating-point, 2=integer — improves deflate speed & ratio
+        # PREDICTOR: 3=floating-point, 2=integer -- improves deflate speed & ratio
         # pwr/dB output is float32; AMP is uint16; DN is uint8
         _predictor = 3 if transform_mode.lower() in ("pwr", "db") else 2
         _write_extra = {"num_threads": _n_th, "predictor": _predictor}
@@ -1927,14 +2123,20 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                 if verbose:
                     print(f"      [{i+1}/{len(variable_names)}] Processing {var}...", flush=True)
 
-                # Read single band — use striped parallel reads for remote files
+                # Read single band -- use striped parallel reads for remote files
                 band_data = _read_bands_parallel(
                     file_url, input_fs, info["grid_path"], [var], row, h, col, w, n_workers=read_threads
                 )[0]
 
+                _var_is_anc = _is_ancillary(var)
+
                 # Take magnitude of off-diagonal (complex) GCOV elements
                 if np.iscomplexobj(band_data):
                     band_data = np.abs(band_data).astype(np.float32)
+
+                # Apply gamma0-to-sigma0 conversion (backscatter only)
+                if _sigma_data is not None and not _var_is_anc:
+                    band_data = band_data * _sigma_data
 
                 # Reshape for downscaling (add band dimension)
                 band_data = band_data[np.newaxis, :, :]
@@ -1943,22 +2145,41 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                 if downscale_factor and downscale_factor > 1:
                     if verbose:
                         print(f"        Downscaling by {downscale_factor} -> {abs(out_res_x):.2f} x {abs(out_res_y):.2f}", flush=True)
-                    band_data = perform_downscaling(band_data, downscale_factor)
+                    if _var_is_anc:
+                        band_data = _downscale_block(band_data, downscale_factor, _ancillary_downscale_method(var))
+                    else:
+                        band_data = perform_downscaling(band_data, downscale_factor)
 
-                # Reproject (on raw power data, before dtype conversion)
+                # Reproject / resample
                 if needs_reproject and warp_kw is not None:
                     if verbose:
                         print(f"        Reprojecting {var}...", flush=True)
-                    band_data_2d = _reproject_power_band(band_data[0], **warp_kw)
+                    if _var_is_anc:
+                        band_data_2d = _reproject_ancillary_band(
+                            band_data[0],
+                            src_transform=warp_kw["src_transform"],
+                            src_crs=warp_kw["src_crs"],
+                            dst_transform=warp_kw["dst_transform"],
+                            dst_crs=warp_kw["dst_crs"],
+                            dst_width=warp_kw["dst_width"],
+                            dst_height=warp_kw["dst_height"],
+                            resample_name=_ancillary_warp_resampling(var),
+                            num_threads=warp_kw.get("num_threads"),
+                        )
+                    else:
+                        band_data_2d = _reproject_power_band(band_data[0], **warp_kw)
                     band_data = band_data_2d[np.newaxis, :, :]
-                elif fill_holes:
+                elif fill_holes and not _var_is_anc:
                     band_data[0] = _fill_nodata_nn(band_data[0])
 
                 # Get output dimensions
                 _, h_out, w_out = band_data.shape
 
-                # Transform
-                if logic_mode == "amp":
+                # Transform -- ancillary grids bypass power scaling
+                if _var_is_anc:
+                    output_dtype = _ancillary_out_dtype(var)
+                    output_nodata = _ancillary_nodata(var)
+                elif logic_mode == "amp":
                     band_data = pwr_to_amp(band_data)
                     output_dtype = "uint16"
                     output_nodata = 0
@@ -1977,27 +2198,45 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                 # Remove band dimension for writing
                 band_data = band_data[0, :, :]
 
-                # Replace ±inf with NaN so COG overview averaging excludes them
-                if output_dtype == "float32":
+                # Final dtype cast and nodata cleanup
+                if output_dtype == "uint8":
+                    band_data = np.nan_to_num(band_data, nan=output_nodata).astype(np.uint8)
+                elif output_dtype == "float32":
                     band_data[~np.isfinite(band_data)] = np.nan
 
-                # Write
-                pol_str = var.lower() if _is_qp else var[:2].lower()
-                suffix = f"-EBD_{frequency}_{pol_str}_{mode_str}.tif"
+                # Write -- ancillary grids get their own suffix
+                if _var_is_anc:
+                    suffix = f"-EBD_{frequency}_{_ancillary_suffix(var)}.tif"
+                else:
+                    pol_str = var.lower() if _is_qp else var[:2].lower()
+                    suffix = f"-EBD_{frequency}_{pol_str}_{mode_str}.tif"
 
                 if final_path.endswith(".tif"):
                     band_path = final_path[:-4] + suffix
                 else:
                     band_path = final_path + suffix
 
-                profile = {"driver": _driver, "height": h_out, "width": w_out, "count": 1, "dtype": output_dtype, "crs": out_crs, "transform": out_transform, "compress": "deflate", "nodata": output_nodata, **_gtiff_extra, **_write_extra}
+                # Per-band write options: predictor and overview resampling
+                # depend on output dtype (int vs float) and variable type
+                _band_predictor = 2 if output_dtype in ("uint8", "uint16") else 3
+                _band_write = dict(_write_extra, predictor=_band_predictor)
+                if _var_is_anc and var == "mask" and _driver == "COG":
+                    _band_write["overview_resampling"] = "nearest"
+
+                profile = {"driver": _driver, "height": h_out, "width": w_out, "count": 1, "dtype": output_dtype, "crs": out_crs, "transform": out_transform, "compress": "deflate", "nodata": output_nodata, **_gtiff_extra, **_band_write}
+
+                _band_tags = dict(acq_meta)
+                if not _var_is_anc:
+                    _band_tags["RADIOMETRY"] = _radiometry
+                    if _db_formula:
+                        _band_tags["DB_FORMULA"] = _db_formula
 
                 with rasterio.Env(GDAL_NUM_THREADS=_n_th, GDAL_OVR_PROPAGATE_NODATA="NO"):
                     with MemoryFile() as memfile:
                         with memfile.open(**profile) as dst:
                             dst.write(band_data, 1)
                             dst.set_band_description(1, var)
-                            dst.update_tags(**acq_meta)
+                            dst.update_tags(**_band_tags)
                             dst.update_tags(1, Date=date_str)
                         memfile.seek(0)
                         write_bytes(band_path, memfile.read())
@@ -2007,9 +2246,11 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                 # Free memory immediately
                 del band_data
 
-            # VRT generation for low-memory mode
-            if vrt:
-                pol_list_str = "".join(v.lower() if _is_qp else v[:2].lower() for v in variable_names)
+            # VRT generation for low-memory mode -- backscatter bands only
+            _bsc_files = [files_map[v] for v in variable_names if not _is_ancillary(v)]
+            _bsc_vars = [v for v in variable_names if not _is_ancillary(v)]
+            if vrt and _bsc_files:
+                pol_list_str = "".join(v.lower() if _is_qp else v[:2].lower() for v in _bsc_vars)
                 vrt_suffix = f"-EBD_{frequency}_{pol_list_str}_{mode_str}.vrt"
 
                 if final_path.endswith(".tif"):
@@ -2017,66 +2258,110 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                 else:
                     vrt_path = final_path + vrt_suffix
 
-                # Note: Pass output_dtype to ensure correct VRT Mapping (e.g. uint8 -> Byte)
-                vrt_xml = generate_vrt_xml_single_step(w_out, h_out, out_transform, out_crs, generated_files, variable_names, date_str, dtype=output_dtype)
+                _vrt_meta = dict(acq_meta, RADIOMETRY=_radiometry)
+                if _db_formula:
+                    _vrt_meta["DB_FORMULA"] = _db_formula
+                vrt_xml = generate_vrt_xml_single_step(w_out, h_out, out_transform, out_crs, _bsc_files, _bsc_vars, date_str, dtype=output_dtype, nodata=output_nodata, metadata=_vrt_meta)
                 if verbose:
                     print(f"    Generated Snapshot VRT: {vrt_path}", flush=True)
                 write_bytes(vrt_path, vrt_xml.encode("utf-8"))
 
         # === NORMAL MODE: Process all bands at once ===
         else:
+            # Separate ancillary bands from backscatter so that
+            # downscale/warp/transform can use the correct strategy per type.
+            _anc_indices = [i for i, v in enumerate(variable_names) if _is_ancillary(v)]
+            _bsc_indices = [i for i, v in enumerate(variable_names) if not _is_ancillary(v)]
+            _anc_data = {variable_names[i]: data_stack[i] for i in _anc_indices}  # 2-D each
+            if _bsc_indices:
+                data_stack = data_stack[_bsc_indices]
+            else:
+                data_stack = np.empty((0,) + data_stack.shape[1:], dtype=np.float32)
+
+            # -- Downscale backscatter (nanmean) --
             if downscale_factor and downscale_factor > 1:
                 if verbose:
                     print(f"    Downscaling by {downscale_factor} -> {abs(out_res_x):.2f} x {abs(out_res_y):.2f}", flush=True)
-                data_stack = perform_downscaling(data_stack, downscale_factor)
+                if data_stack.shape[0] > 0:
+                    data_stack = perform_downscaling(data_stack, downscale_factor)
+                for vname, arr in _anc_data.items():
+                    _anc_data[vname] = _downscale_block(
+                        arr[np.newaxis], downscale_factor, _ancillary_downscale_method(vname)
+                    )[0]
 
-            # Reproject (on raw power data, before dtype conversion)
+            # -- Reproject / resample --
             if needs_reproject and warp_kw is not None:
                 if verbose:
-                    print(f"    Reprojecting {len(variable_names)} bands...", flush=True)
-                n_bands = data_stack.shape[0]
-                warped = np.full((n_bands, warp_kw["dst_height"], warp_kw["dst_width"]), np.nan, dtype=np.float32)
-                for bi in range(n_bands):
-                    warped[bi] = _reproject_power_band(data_stack[bi], **warp_kw)
-                data_stack = warped
+                    _n_bsc = data_stack.shape[0]
+                    _n_anc = len(_anc_data)
+                    _est_gb = (_n_bsc * 2 + _n_anc) * warp_kw["dst_height"] * warp_kw["dst_width"] * 4 / 1e9
+                    print(f"    Reprojecting {_n_bsc} backscatter + {_n_anc} ancillary bands (~{_est_gb:.1f} GB)...", flush=True)
+                if data_stack.shape[0] > 0:
+                    n_bsc = data_stack.shape[0]
+                    warped = np.full((n_bsc, warp_kw["dst_height"], warp_kw["dst_width"]), np.nan, dtype=np.float32)
+                    for bi in range(n_bsc):
+                        warped[bi] = _reproject_power_band(data_stack[bi], **warp_kw)
+                    data_stack = warped
+                for vname, arr in _anc_data.items():
+                    _anc_data[vname] = _reproject_ancillary_band(
+                        arr,
+                        src_transform=warp_kw["src_transform"],
+                        src_crs=warp_kw["src_crs"],
+                        dst_transform=warp_kw["dst_transform"],
+                        dst_crs=warp_kw["dst_crs"],
+                        dst_width=warp_kw["dst_width"],
+                        dst_height=warp_kw["dst_height"],
+                        resample_name=_ancillary_warp_resampling(vname),
+                        num_threads=warp_kw.get("num_threads"),
+                    )
             elif fill_holes:
                 for bi in range(data_stack.shape[0]):
                     data_stack[bi] = _fill_nodata_nn(data_stack[bi])
+                # No hole-fill for ancillary grids
 
-            _, h_out, w_out = data_stack.shape
+            if data_stack.shape[0] > 0:
+                _, h_out, w_out = data_stack.shape
+            elif _anc_data:
+                _first_anc = next(iter(_anc_data.values()))
+                h_out, w_out = _first_anc.shape
+            else:
+                raise ValueError("No bands to process.")
 
-            # --- TRANSFORM LOGIC ---
+            # --- TRANSFORM LOGIC (backscatter only) ---
             if verbose:
                 print(f"    Transforming: {mode_str} (Mode: {logic_mode})", flush=True)
 
-            if logic_mode == "amp":
+            if data_stack.shape[0] == 0:
+                processed_data = data_stack
+                output_dtype = "float32"
+                output_nodata = np.nan
+            elif logic_mode == "amp":
                 processed_data = pwr_to_amp(data_stack)
                 output_dtype = "uint16"
                 output_nodata = 0
-
             elif logic_mode == "dn":
                 processed_data = power_to_dn_uint8(data_stack)
                 output_dtype = "uint8"
                 output_nodata = 0
-
             elif logic_mode == "db":
                 processed_data = power_to_db_float32(data_stack)
                 output_dtype = "float32"
                 output_nodata = np.nan
-
             else:
-                # No Transform ("pwr" or None)
                 processed_data = data_stack
                 output_dtype = "float32"
                 output_nodata = np.nan
 
             # --- DUAL-POL RATIO: append as extra band after transform ---
+            # With -dpratio, ancillary vars are already stripped from variable_names,
+            # so _bsc_indices maps 1:1 onto processed_data bands.
             if dualpol_ratio and _ratio_pol_override:
-                num_idx = variable_names.index(_ratio_num_var)
-                den_idx = variable_names.index(_ratio_den_var)
+                _bsc_var_list = [variable_names[i] for i in _bsc_indices]
+                num_idx = _bsc_var_list.index(_ratio_num_var)
+                den_idx = _bsc_var_list.index(_ratio_den_var)
 
                 if logic_mode == "amp":
-                    # (amp_likepol / amp_crosspol) * 1000 → uint16, nodata=0, clamp [1, 65535]
+                    # (amp_likepol / amp_crosspol) * 1000 -> uint16, nodata=0, clamp [1, 65535]
                     with np.errstate(divide="ignore", invalid="ignore"):
                         ratio_data = (processed_data[num_idx].astype(np.float32) /
                                       processed_data[den_idx].astype(np.float32) * 1000.0)
@@ -2086,7 +2371,7 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                     ratio_band = ratio_data.astype(np.uint16)
 
                 elif logic_mode == "dn":
-                    # dn_likepol - dn_crosspol + 127 → uint8, nodata=0, clamp [1, 255]
+                    # dn_likepol - dn_crosspol + 127 -> uint8, nodata=0, clamp [1, 255]
                     ratio_data = (processed_data[num_idx].astype(np.float32) -
                                   processed_data[den_idx].astype(np.float32) + 127.0)
                     nodata_mask = (processed_data[num_idx] == 0) | (processed_data[den_idx] == 0)
@@ -2095,11 +2380,11 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                     ratio_band = ratio_data.astype(np.uint8)
 
                 elif logic_mode == "db":
-                    # dB_likepol - dB_crosspol → float32
+                    # dB_likepol - dB_crosspol -> float32
                     ratio_band = (processed_data[num_idx] - processed_data[den_idx]).astype(np.float32)
 
                 else:
-                    # pwr: likepol / crosspol → float32
+                    # pwr: likepol / crosspol -> float32
                     with np.errstate(divide="ignore", invalid="ignore"):
                         ratio_band = np.where(
                             processed_data[den_idx] != 0,
@@ -2110,37 +2395,69 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                 processed_data = np.concatenate([processed_data, ratio_band[np.newaxis, :, :]], axis=0)
                 variable_names = list(variable_names) + [_ratio_band_name]
 
-            # Replace ±inf with NaN so COG overview averaging excludes them
-            if output_dtype == "float32":
+            # Replace +/-inf with NaN so COG overview averaging excludes them
+            if output_dtype == "float32" and processed_data.shape[0] > 0:
                 processed_data[~np.isfinite(processed_data)] = np.nan
+
+            # Build ordered write list: (var_name, 2d_array, dtype, nodata)
+            # Backscatter bands (incl. ratio) come from processed_data;
+            # ancillary from _anc_data.
+            _write_list = []
+            _bsc_idx = 0
+            for var in variable_names:
+                if _is_ancillary(var):
+                    _write_list.append((var, _anc_data[var], _ancillary_out_dtype(var), _ancillary_nodata(var)))
+                else:
+                    _write_list.append((var, processed_data[_bsc_idx], output_dtype, output_nodata))
+                    _bsc_idx += 1
 
             if single_bands:
                 if verbose:
                     print("    Writing separate bands...", flush=True)
                     _t_write = _time.perf_counter()
                 generated_files = []
-                for i, var in enumerate(variable_names):
-                    pol_str = (_ratio_pol_override if var == _ratio_band_name
-                               else var[:2].lower() if dualpol_ratio
-                               else var.lower() if _is_qp
-                               else var[:2].lower())
-                    suffix = f"-EBD_{frequency}_{pol_str}_{mode_str}.tif"
+                for var, band_data, _bd_dtype, _bd_nodata in _write_list:
+                    _var_is_anc = _is_ancillary(var)
+
+                    # Suffix
+                    if _var_is_anc:
+                        suffix = f"-EBD_{frequency}_{_ancillary_suffix(var)}.tif"
+                    else:
+                        pol_str = (_ratio_pol_override if var == _ratio_band_name
+                                   else var[:2].lower() if dualpol_ratio
+                                   else var.lower() if _is_qp
+                                   else var[:2].lower())
+                        suffix = f"-EBD_{frequency}_{pol_str}_{mode_str}.tif"
 
                     if final_path.endswith(".tif"):
                         band_path = final_path[:-4] + suffix
                     else:
                         band_path = final_path + suffix
 
-                    band_data = processed_data[i, :, :]
+                    # Final dtype cast
+                    if _bd_dtype == "uint8":
+                        band_data = np.nan_to_num(band_data, nan=float(_bd_nodata)).astype(np.uint8)
 
-                    profile = {"driver": _driver, "height": h_out, "width": w_out, "count": 1, "dtype": output_dtype, "crs": out_crs, "transform": out_transform, "compress": "deflate", "nodata": output_nodata, **_gtiff_extra, **_write_extra}
+                    # Per-band write options
+                    _band_predictor = 2 if _bd_dtype in ("uint8", "uint16") else 3
+                    _band_write = dict(_write_extra, predictor=_band_predictor)
+                    if _var_is_anc and var == "mask" and _driver == "COG":
+                        _band_write["overview_resampling"] = "nearest"
+
+                    profile = {"driver": _driver, "height": h_out, "width": w_out, "count": 1, "dtype": _bd_dtype, "crs": out_crs, "transform": out_transform, "compress": "deflate", "nodata": _bd_nodata, **_gtiff_extra, **_band_write}
+
+                    _band_tags = dict(acq_meta)
+                    if not _var_is_anc:
+                        _band_tags["RADIOMETRY"] = _radiometry
+                        if _db_formula:
+                            _band_tags["DB_FORMULA"] = _db_formula
 
                     with rasterio.Env(GDAL_OVR_PROPAGATE_NODATA="NO"):
                         with MemoryFile() as memfile:
                             with memfile.open(**profile) as dst:
                                 dst.write(band_data, 1)
                                 dst.set_band_description(1, var)
-                                dst.update_tags(**acq_meta)
+                                dst.update_tags(**_band_tags)
                                 dst.update_tags(1, Date=date_str)
                             memfile.seek(0)
                             write_bytes(band_path, memfile.read())
@@ -2151,12 +2468,15 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                     sz = sum(os.path.getsize(p) for p in generated_files if os.path.isfile(p))
                     print(f"    [t] COG write ({len(generated_files)} bands, {sz/1e6:.1f} MB): {_time.perf_counter()-_t_write:.1f}s", flush=True)
 
-                if vrt:
+                # Snapshot VRT -- backscatter bands only (ancillary kept as separate TIFs)
+                _bsc_files = [files_map[v] for v in variable_names if not _is_ancillary(v)]
+                _bsc_vars = [v for v in variable_names if not _is_ancillary(v)]
+                if vrt and _bsc_files:
                     if _ratio_pol_override:
-                        _src_vars = [v for v in variable_names if v != _ratio_band_name]
+                        _src_vars = [v for v in _bsc_vars if v != _ratio_band_name]
                         pol_list_str = "".join(v[:2].lower() for v in _src_vars) + _ratio_pol_override
                     else:
-                        pol_list_str = "".join(v.lower() if _is_qp else v[:2].lower() for v in variable_names)
+                        pol_list_str = "".join(v.lower() if _is_qp else v[:2].lower() for v in _bsc_vars)
                     vrt_suffix = f"-EBD_{frequency}_{pol_list_str}_{mode_str}.vrt"
 
                     if final_path.endswith(".tif"):
@@ -2164,36 +2484,68 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
                     else:
                         vrt_path = final_path + vrt_suffix
 
-                    # Note: Pass output_dtype to ensure correct VRT Mapping (e.g. uint8 -> Byte)
-                    vrt_xml = generate_vrt_xml_single_step(w_out, h_out, out_transform, out_crs, generated_files, variable_names, date_str, dtype=output_dtype)
+                    _vrt_meta = dict(acq_meta, RADIOMETRY=_radiometry)
+                    if _db_formula:
+                        _vrt_meta["DB_FORMULA"] = _db_formula
+                    vrt_xml = generate_vrt_xml_single_step(w_out, h_out, out_transform, out_crs, _bsc_files, _bsc_vars, date_str, dtype=output_dtype, nodata=output_nodata, metadata=_vrt_meta)
                     if verbose:
                         print(f"    Generated Snapshot VRT: {vrt_path}", flush=True)
                     write_bytes(vrt_path, vrt_xml.encode("utf-8"))
             else:
+                # Multi-band COG: backscatter bands only; ancillary written as separate TIFs
                 if verbose:
                     print("    Writing Multi-band COG...", flush=True)
                     _t_write = _time.perf_counter()
-                profile = {"driver": _driver, "height": h_out, "width": w_out, "count": len(variable_names), "dtype": output_dtype, "crs": out_crs, "transform": out_transform, "compress": "deflate", "nodata": output_nodata, **_gtiff_extra, **_write_extra}
+                _bsc_vars = [v for v in variable_names if not _is_ancillary(v)]
+                _mb_tags = dict(acq_meta, RADIOMETRY=_radiometry)
+                if _db_formula:
+                    _mb_tags["DB_FORMULA"] = _db_formula
+                profile = {"driver": _driver, "height": h_out, "width": w_out, "count": processed_data.shape[0], "dtype": output_dtype, "crs": out_crs, "transform": out_transform, "compress": "deflate", "nodata": output_nodata, **_gtiff_extra, **_write_extra}
                 with rasterio.Env(GDAL_NUM_THREADS=_n_th, GDAL_OVR_PROPAGATE_NODATA="NO"):
                     with MemoryFile() as memfile:
                         with memfile.open(**profile) as dst:
                             dst.write(processed_data)
-                            for i, var in enumerate(variable_names):
+                            for i, var in enumerate(_bsc_vars):
                                 dst.set_band_description(i + 1, var)
                                 dst.update_tags(i + 1, Date=date_str)
-                            dst.update_tags(**acq_meta)
+                            dst.update_tags(**_mb_tags)
                         memfile.seek(0)
                         write_bytes(final_path, memfile.read())
 
-                for var in variable_names:
+                for var in _bsc_vars:
                     files_map[var] = final_path
+
+                # Write ancillary bands as separate TIFs
+                for var, arr in _anc_data.items():
+                    _anc_suf = f"-EBD_{frequency}_{_ancillary_suffix(var)}.tif"
+                    band_path = (final_path[:-4] if final_path.endswith(".tif") else final_path) + _anc_suf
+                    _ad = _ancillary_out_dtype(var)
+                    _an = _ancillary_nodata(var)
+                    _ap = 2 if _ad in ("uint8", "uint16") else 3
+                    _aw = dict(_write_extra, predictor=_ap)
+                    if var == "mask" and _driver == "COG":
+                        _aw["overview_resampling"] = "nearest"
+                    band_out = np.nan_to_num(arr, nan=float(_an)).astype(np.uint8) if _ad == "uint8" else arr
+                    _profile = {"driver": _driver, "height": h_out, "width": w_out, "count": 1, "dtype": _ad, "crs": out_crs, "transform": out_transform, "compress": "deflate", "nodata": _an, **_gtiff_extra, **_aw}
+                    with rasterio.Env(GDAL_OVR_PROPAGATE_NODATA="NO"):
+                        with MemoryFile() as memfile:
+                            with memfile.open(**_profile) as dst:
+                                dst.write(band_out, 1)
+                                dst.set_band_description(1, var)
+                                dst.update_tags(**acq_meta)
+                                dst.update_tags(1, Date=date_str)
+                            memfile.seek(0)
+                            write_bytes(band_path, memfile.read())
+                    files_map[var] = band_path
+
                 if verbose:
-                    sz = os.path.getsize(final_path) if os.path.isfile(final_path) else 0
-                    print(f"    [t] COG write ({len(variable_names)} bands, {sz/1e6:.1f} MB): {_time.perf_counter()-_t_write:.1f}s", flush=True)
+                    _all_files = [final_path] + [files_map[v] for v in _anc_data]
+                    sz = sum(os.path.getsize(p) for p in _all_files if os.path.isfile(p))
+                    print(f"    [t] COG write ({processed_data.shape[0]}+{len(_anc_data)} bands, {sz/1e6:.1f} MB): {_time.perf_counter()-_t_write:.1f}s", flush=True)
 
         if verbose:
             memory_mode = "low-memory (per-band)" if use_low_memory_mode else "standard (all-bands)"
-            print(f"    ✓ Complete ({memory_mode} mode)", flush=True)
+            print(f"    [OK] Complete ({memory_mode} mode)", flush=True)
 
         return {"success": True, "h5_url": h5_url, "date": date_str, "files_map": files_map, "info": {"w": w_out, "h": h_out, "transform": out_transform, "crs": out_crs, "dtype": output_dtype}}
 
@@ -2230,7 +2582,7 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
 # =========================================================
 
 
-def process_chunk_task(h5_url, variable_names, output_path, srcwin=None, projwin=None, transform_mode="db", frequency="A", single_bands=False, vrt=False, downscale_factor=None, target_align_pixels=False, input_auth=None, output_auth=None, time_series_vrt=True, list_grids=False, cache=None, keep=False, verbose=False, target_srs=None, target_res=None, resample="cubic", output_format="COG", fill_holes=False, num_threads=None, read_threads=8, dualpol_ratio=False):
+def process_chunk_task(h5_url, variable_names, output_path, srcwin=None, projwin=None, transform_mode="db", frequency="A", single_bands=False, vrt=False, downscale_factor=None, target_align_pixels=False, input_auth=None, output_auth=None, time_series_vrt=True, list_grids=False, cache=None, keep=False, verbose=False, target_srs=None, target_res=None, resample="cubic", output_format="COG", fill_holes=False, num_threads=None, read_threads=8, dualpol_ratio=False, sigma0=False):
 
     use_earthdata = False
     if input_auth is None:
@@ -2281,7 +2633,7 @@ def process_chunk_task(h5_url, variable_names, output_path, srcwin=None, projwin
 
     try:
         # For HTTPS earthdata URLs, open_h5_lazy uses earthaccess.open() directly
-        # and ignores input_fs — skip the create_s3_fs call (and its login round-trip).
+        # and ignores input_fs -- skip the create_s3_fs call (and its login round-trip).
         _https_earthdata = use_earthdata and urls and urls[0].startswith("https://")
         input_fs = None if _https_earthdata else create_s3_fs(input_auth)
 
@@ -2309,7 +2661,13 @@ def process_chunk_task(h5_url, variable_names, output_path, srcwin=None, projwin
                         print(f"    Footprint (Lon/Lat): {details.get('poly_geo', 'N/A')}")
                         print(f"    Footprint (Native):  {details.get('poly_native', 'N/A')}")
                         print(f"    Frame Size:          {details.get('dims', 'N/A')}")
-                        print(f"    Variables: {', '.join(details['vars'])}")
+                        print(f"    Variables:")
+                        vd = details.get("var_details", {})
+                        for vname in details["vars"]:
+                            info_v = vd.get(vname, {})
+                            dt = info_v.get("dtype", "?")
+                            nd = info_v.get("nodata", "?")
+                            print(f"      {vname:30s}  dtype={dt}  nodata={nd}")
                 return "Inspection Complete."
             except Exception as e:
                 import traceback
@@ -2351,7 +2709,7 @@ def process_chunk_task(h5_url, variable_names, output_path, srcwin=None, projwin
             output_fs = create_s3_fs(output_auth)
 
         for url in urls:
-            res = _process_single_file(url, variable_names, output_path, srcwin, projwin, transform_mode, frequency, single_bands, vrt, downscale_factor, target_align_pixels, input_fs, output_fs, is_batch=is_batch, cache=cache, keep=keep, use_earthdata=use_earthdata, verbose=verbose, target_srs=target_srs, target_res=target_res, resample=resample, output_format=output_format, fill_holes=fill_holes, num_threads=num_threads, read_threads=read_threads, dualpol_ratio=dualpol_ratio)
+            res = _process_single_file(url, variable_names, output_path, srcwin, projwin, transform_mode, frequency, single_bands, vrt, downscale_factor, target_align_pixels, input_fs, output_fs, is_batch=is_batch, cache=cache, keep=keep, use_earthdata=use_earthdata, verbose=verbose, target_srs=target_srs, target_res=target_res, resample=resample, output_format=output_format, fill_holes=fill_holes, num_threads=num_threads, read_threads=read_threads, dualpol_ratio=dualpol_ratio, sigma0=sigma0)
             results_meta.append(res)
 
         if is_batch and time_series_vrt and output_format.lower() != "h5":
@@ -2383,13 +2741,24 @@ def process_chunk_task(h5_url, variable_names, output_path, srcwin=None, projwin
                     with open(path, "wb") as f_out:
                         f_out.write(bytes_data)
 
+            # Separate backscatter and ancillary variables; track backscatter-only index
+            _bsc_vars_ts = [v for v in variable_names if not _is_ancillary(v)]
+            _bsc_idx_map = {v: i for i, v in enumerate(_bsc_vars_ts)}
+
+            # Build per-variable time-series VRTs for backscatter only.
+            # Ancillary TS VRTs are built by build_track_vrts (mosaic-aware).
+            _bsc_count = 0
             for var_idx, var in enumerate(variable_names):
+                if _is_ancillary(var):
+                    continue
+
                 pol_str = var[:2].lower()
+
                 stack_items = []
                 dates_list = []
                 for r in valid_results:
                     fpath = r["files_map"][var]
-                    b_idx = 1 if single_bands else (var_idx + 1)
+                    b_idx = 1 if single_bands else (_bsc_idx_map[var] + 1)
                     item = {"path": fpath, "band_idx": b_idx, "date": r["date"]}
                     if not all_same_geom:
                         item["transform"] = r["info"]["transform"]
@@ -2398,7 +2767,6 @@ def process_chunk_task(h5_url, variable_names, output_path, srcwin=None, projwin
                     stack_items.append(item)
                     dates_list.append(r["date"].replace("-", ""))
 
-                # Note: Pass output_dtype to ensure correct VRT Mapping (e.g. uint8 -> Byte)
                 if all_same_geom:
                     vrt_xml = generate_vrt_xml_timeseries(ref_info["w"], ref_info["h"], ref_info["transform"], ref_info["crs"], stack_items, dtype=ref_info["dtype"])
                 else:
@@ -2411,8 +2779,9 @@ def process_chunk_task(h5_url, variable_names, output_path, srcwin=None, projwin
                     print(f"  --> VRT: {vrt_name}")
                 write_bytes(vrt_full_path, vrt_xml.encode("utf-8"))
                 write_bytes(vrt_full_path.replace(".vrt", ".dates"), "\n".join(dates_list).encode("utf-8"))
+                _bsc_count += 1
 
-            return f"Batch Complete. Generated {len(variable_names)} Time Series VRTs."
+            return f"Batch Complete. Generated {_bsc_count} Time Series VRTs."
 
         if len(results_meta) == 1:
             return "Done" if results_meta[0]["success"] else results_meta[0]["error"]
@@ -2643,12 +3012,12 @@ if __name__ == "__main__":
     print(__doc__)
     print("\n" + "=" * 70)
     if HAS_DATATREE:
-        print("✓ OPTIMIZED MODE: datatree available for fast HDF5 access")
+        print("[OK] OPTIMIZED MODE: datatree available for fast HDF5 access")
         print("  - Lazy loading with spatial subsetting")
         print("  - Parallel band extraction")
         print("  - Reduced memory footprint")
     else:
-        print("⚠ FALLBACK MODE: Using h5py (slower)")
+        print("[!] FALLBACK MODE: Using h5py (slower)")
         print("  Install datatree for better performance:")
         print("    pip install xarray-datatree")
         print("    or: pip install 'xarray>=2024.2.0'")

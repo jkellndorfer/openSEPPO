@@ -1,13 +1,13 @@
 # Quick Start
 
 Get from zero to NISAR GeoTIFFs in a few commands. This example processes
-track 105 frames 17–18.
+track 105 frames 17-18.
 
 **IMPORTANT:** Ideally run on an AWS ec2 instance in `us-west-2` where NISAR data reside (32GB RAM recommended for full scenes, less for subsets). Outside `us-west-2` add `--https` to the search command. Output supports `s3://my-bucket/prefix/`. If full scenes are requested, caching is automatically turned on (`--cache y`) See full documentation.
 
 ---
 
-## 1 — Install
+## 1 -- Install
 
 ```bash
 mamba create -n openseppo -c conda-forge openseppo aria2
@@ -16,7 +16,7 @@ conda activate openseppo
 
 ---
 
-## 2 — Credentials
+## 2 -- Credentials
 
 Store your [NASA Earthdata](https://urs.earthdata.nasa.gov/users/new) login in `~/.netrc` once:
 
@@ -34,7 +34,7 @@ seppo_earthaccess_credentials -t
 
 ---
 
-## 3 — Find scenes
+## 3 -- Find scenes
 
 Search for NISAR GCOV scenes for track 105, frames 17 and 18:
 (omit `--https` flag  if on an ec2 instance in us-west-2)
@@ -48,7 +48,7 @@ seppo_nisar_search --track 105 --frame 17 18 --start_time_before 2026-01-17 \
 
 ---
 
-## 4 — Inspect available grids
+## 4 -- Inspect available grids
 
 Check which frequencies and polarizations are in the first file before converting:
 
@@ -58,7 +58,7 @@ seppo_nisar_gcov_convert -i urls.txt -lg
 
 ---
 
-## 5 — Convert to GeoTIFF
+## 5 -- Convert to GeoTIFF
 
 Convert to amplitude-scaled Cloud Optimized GeoTIFFs at 20 m resolution,
 clipped to a subset provided in projection coordinates crossing the two frames, with a time-series VRT stack:
@@ -74,19 +74,20 @@ Output:
 
 ```
 out/
-  NISAR_..._hh_AMP.tif       ← HH backscatter (uint16, amplitude, COG)
-  NISAR_..._hv_AMP.tif       ← HV backscatter (uint16, amplitude, COG)
-  NISAR_..._hhhv_AMP.vrt     ← per-scene snapshot VRT (both pols)
-  NISAR_..._hh_AMP.vrt       ← time-series VRT stack (1 band per date)
-  NISAR_..._hv_AMP.vrt        ← time-series VRT stack
+  NISAR_..._hh_AMP.tif       <- HH backscatter (uint16, amplitude, COG)
+  NISAR_..._hv_AMP.tif       <- HV backscatter (uint16, amplitude, COG)
+  NISAR_..._hhhv_AMP.vrt     <- per-scene snapshot VRT (both pols)
+  NISAR_..._hh_AMP.vrt       <- time-series VRT stack (1 band per date)
+  NISAR_..._hv_AMP.vrt        <- time-series VRT stack
 ```
 
 ---
 
 ## Optional: ancillary layers
 
-Extract mask, number of looks, and the gamma-to-sigma conversion factor
-(no backscatter scaling applied):
+Extract mask, number of looks, and the gamma-to-sigma conversion factor.
+Ancillary grids bypass backscatter scaling and receive specialized
+downscaling (mask: priority 255>0>subswath, numberOfLooks: sum):
 
 ```bash
 seppo_nisar_gcov_convert -i urls.txt -o out_anc/ \
@@ -94,6 +95,8 @@ seppo_nisar_gcov_convert -i urls.txt -o out_anc/ \
     --vars mask numberOfLooks rtcGammaToSigmaFactor \
     -v
 ```
+
+Output: `_mask.tif` (uint8, nodata=255), `_nlooks.tif` (float32), `_gamma2sigma.tif` (float32).
 
 ---
 
@@ -107,6 +110,15 @@ seppo_nisar_gcov_convert -i urls.txt -o out/ -dB -v
 seppo_nisar_gcov_convert -i urls.txt -o out/ \
     -DN -dpratio --no_single_bands \
     -t_srs 4326 -tr 0.001 0.001
+
+# Sigma0 conversion
+seppo_nisar_gcov_convert -i urls.txt -o out/ -sigma0 -amp
+
+# Rebuild VRTs from existing TIFs (auto-detects mode)
+seppo_nisar_gcov_convert -o out/ -ro
+
+# Show output summary with /vsis3/ paths for QGIS
+seppo_nisar_gcov_convert -o s3://my-bucket/out/ -S -vsis3
 ```
 
 ---
@@ -118,14 +130,14 @@ See [Examples](nisar_gcov_convert_examples.md) for the full reference, or [CLI R
 ## Load the time-series VRT stack into Python
 
 The per-track time-series VRT (one band per acquisition date) can be opened
-lazily with `rioxarray` — no data is read until you actually index or compute:
+lazily with `rioxarray` -- no data is read until you actually index or compute:
 
 ```python
 import rioxarray
 
 s3 = "s3://seppo1-data/NISAR/test3/NISAR_L2_PR_GCOV_005-010_105-105_A-A_017-018_4005_DHDH_A_20251117T111904_20260116T112015-EBD_A_hh_AMP.vrt"
 
-# Open lazily — bands = acquisition dates, nothing is read yet
+# Open lazily -- bands = acquisition dates, nothing is read yet
 da = rioxarray.open_rasterio(s3, chunks={})
 print(da)  # shape, dims, CRS, dtype
 
@@ -142,5 +154,5 @@ The `band` dimension corresponds to acquisition order. Each band's
 
 ## Using openSEPPO in Python / Jupyter
 
-For integrating openSEPPO into a Python script or notebook — including programmatic search and conversion — see the
+For integrating openSEPPO into a Python script or notebook -- including programmatic search and conversion -- see the
 [Jupyter Notebook example](openSEPPO_example.md).

@@ -1,4 +1,4 @@
-# seppo_nisar_gcov_convert — CLI Reference
+# seppo_nisar_gcov_convert -- CLI Reference
 
 Convert NISAR HDF5 GCOV data to Cloud Optimized GeoTIFF (COG) with optional VRT stacking.
 
@@ -10,7 +10,7 @@ Convert NISAR HDF5 GCOV data to Cloud Optimized GeoTIFF (COG) with optional VRT 
 seppo_nisar_gcov_convert [-h] [-i H5 [H5 ...]] [-o OUTPUT]
                          [-vars VARS [VARS ...]] [-f {A,B}] [-lg]
                          [-DN | -amp | -dB | -pwr] [-of {COG,GTiff,h5}]
-                         [-dpratio] [-d DOWNSCALE] [--no_vrt]
+                         [-dpratio] [-sigma0] [-d DOWNSCALE] [--no_vrt]
                          [--no_time_series] [--no_single_bands]
                          [-srcwin XOFF YOFF XSIZE YSIZE | -projwin ULX ULY LRX LRY]
                          [--no_tap] [-t_srs TARGET_SRS] [-tr XRES YRES]
@@ -18,7 +18,7 @@ seppo_nisar_gcov_convert [-h] [-i H5 [H5 ...]] [-o OUTPUT]
                          [--warp_threads N] [--read_threads N]
                          [--profile PROFILE] [--input_profile INPUT_PROFILE]
                          [--output_profile OUTPUT_PROFILE]
-                         [-ro] [-R] [-S] [-cache CACHE] [-keep] [-v]
+                         [-ro] [-S] [-vsis3] [-cache CACHE] [-keep] [-v]
 ```
 
 ---
@@ -37,19 +37,32 @@ seppo_nisar_gcov_convert [-h] [-i H5 [H5 ...]] [-o OUTPUT]
 
 | Argument | Description |
 |----------|-------------|
-| `-vars`, `--vars` | Grid variables to extract, e.g. `HHHH HVHV`. If omitted, all variables for the frequency are used. |
+| `-vars`, `--vars` | Grid variables to extract, e.g. `HHHH HVHV`. Ancillary grids (`mask`, `numberOfLooks`, `rtcGammaToSigmaFactor`) are also supported and receive specialized processing. If omitted, all covariance variables for the frequency are used. |
 | `-f {A,B}`, `--freq` | Frequency band (`A` or `B`). Default: `A`. |
-| `-lg`, `--list_grids` | Scan the first H5 file and list all available grids/frequencies/variables, then exit. |
+| `-lg`, `--list_grids` | Scan the first H5 file and list all available grids/frequencies/variables with dtype and nodata, then exit. |
 
 ### Scaling / Output Mode
 
 | Argument | Description |
 |----------|-------------|
-| `-DN` | DN mode: uint8 scaled 1–255. `dB = -31.15 + DN × 0.15` (range -31 to +7.1 dB). DN=0 is nodata. |
-| `-amp` | Amplitude mode: uint16. |
-| `-dB` | dB mode: float32. |
-| `-pwr` | Power mode: raw float32 (default). |
-| `-dpratio`, `--dualpol_ratio` | Compute dual-pol power ratio: HHHH/HVHV (DH mode) or VVVV/VHVH (DV mode). Incompatible with QP or single-pol acquisitions. |
+| `-DN` | DN mode: uint8 scaled 1-255. `dB = -31.15 + DN x 0.15` (range -31 to +7.1 dB). DN=0 is nodata. |
+| `-amp` | Amplitude mode: uint16. `dB = 20*log10(DN) - 83`. DN=0 is nodata. |
+| `-dB` | dB mode: float32. Value is dB directly. |
+| `-pwr` | Power mode: raw float32 (default). `dB = 10*log10(DN)`. |
+| `-dpratio`, `--dualpol_ratio` | Compute dual-pol power ratio: HHHH/HVHV (DH mode) or VVVV/VHVH (DV mode). Ancillary grids are automatically excluded when `-dpratio` is active; process them in a separate run. |
+| `-sigma0`, `--sigma0` | Convert gamma0 backscatter to sigma0 by multiplying power values with the `rtcGammaToSigmaFactor` layer from the GCOV file. Applied before any downscaling or resampling. |
+
+### Ancillary Grid Handling
+
+When ancillary variables (`mask`, `numberOfLooks`, `rtcGammaToSigmaFactor`) are included in `--vars`:
+
+| Variable | Output suffix | Downscale | Warp resampling | dtype | nodata |
+|----------|--------------|-----------|-----------------|-------|--------|
+| `mask` | `_mask.tif` | Priority (255 > 0 > subswath) | nearest | uint8 | 255 |
+| `numberOfLooks` | `_nlooks.tif` | sum | sum | float32 | NaN |
+| `rtcGammaToSigmaFactor` | `_gamma2sigma.tif` | mean | average | float32 | NaN |
+
+Ancillary grids bypass backscatter scaling modes (`-amp`, `-dB`, `-DN`) and are always written as separate TIFs.
 
 ### Spatial Subsetting
 
@@ -65,9 +78,9 @@ seppo_nisar_gcov_convert [-h] [-i H5 [H5 ...]] [-o OUTPUT]
 | `-t_srs TARGET_SRS` | Target CRS for output (e.g. `EPSG:4326` or bare `4326`). If omitted, output stays in native UTM. |
 | `-tr XRES YRES` | Explicit output pixel size in target CRS units (e.g. `-tr 0.001 0.001` for ~100 m in degrees). Triggers auto pre-downscaling when a large reduction factor is implied. |
 | `--resample` | Resampling method: `nearest`, `bilinear`, `cubic` (default), `cubicspline`, `lanczos`, `average`. |
-| `--fill_holes` | Fill interior NaN/±inf pixels with their nearest valid neighbour before resampling. Frame-boundary nodata is unaffected. |
+| `--fill_holes` | Fill interior NaN/+/-inf pixels with their nearest valid neighbour before resampling. Frame-boundary nodata is unaffected. Higher memory usage. |
 | `--no_tap` | Disable pixel-grid alignment. By default the output origin is snapped to integer multiples of the target pixel size. |
-| `-d DOWNSCALE`, `--downscale` | Manual downscale factor (integer). E.g. `2` for 2×2 block averaging. |
+| `-d DOWNSCALE`, `--downscale` | Manual downscale factor (integer). E.g. `2` for 2x2 block averaging. |
 | `--warp_threads N` | Number of threads for reprojection. Default: all available CPU cores. |
 | `--read_threads N` | Number of parallel S3/HTTPS connections for reading HDF5 chunks. Default: 8. |
 
@@ -78,9 +91,9 @@ seppo_nisar_gcov_convert [-h] [-i H5 [H5 ...]] [-o OUTPUT]
 | `--no_vrt` | Disable generation of per-snapshot multi-pol VRTs. |
 | `--no_time_series` | Disable generation of time-series VRT stacks. |
 | `--no_single_bands` | Save a multi-band COG instead of separate files per polarization. |
-| `-ro`, `--rebuild_only` | Skip processing and only rebuild VRTs in the output folder. |
-| `-R`, `--rebuild_all_vrts` | After processing, rescan the output folder and rebuild all VRTs to include all timesteps (old + new). |
-| `-S`, `--show_vrts` | Print a formatted summary of all VRTs in the output folder grouped by type (requires `-o`). No processing is performed. |
+| `-ro`, `--rebuild_only` | Skip processing and rebuild all VRTs in the output folder from existing TIFs. Auto-detects scaling mode. |
+| `-S`, `--show_vrts` | Print a structured summary of all VRTs and TIFs in the output folder (requires `-o`). Auto-detects scaling mode -- no need to pass `-amp`/`-dB` etc. |
+| `-vsis3`, `--vsis3` | With `-S`: print S3 paths as `/vsis3/` URIs for direct paste into QGIS/GDAL. |
 
 ### AWS / Cloud
 
@@ -101,82 +114,34 @@ seppo_nisar_gcov_convert [-h] [-i H5 [H5 ...]] [-o OUTPUT]
 
 ---
 
-## Full help output
+## VRT Generation Pipeline
 
-```
-usage: nisar_gcov_convert.py [-h] [-i H5 [H5 ...]] [-o OUTPUT]
-                             [-vars VARS [VARS ...]] [-f {A,B}] [-lg]
-                             [-DN | -amp | -dB | -pwr] [-of {COG,GTiff,h5}]
-                             [-dpratio] [-d DOWNSCALE] [--no_vrt]
-                             [--no_time_series] [--no_single_bands]
-                             [-srcwin XOFF YOFF XSIZE YSIZE | -projwin ULX ULY LRX LRY]
-                             [--no_tap] [-t_srs TARGET_SRS] [-tr XRES YRES]
-                             [--resample RESAMPLE] [--fill_holes]
-                             [--warp_threads N] [--read_threads N]
-                             [--profile PROFILE]
-                             [--input_profile INPUT_PROFILE]
-                             [--output_profile OUTPUT_PROFILE] [-ro] [-R] [-S]
-                             [-cache CACHE] [-keep] [-v]
+After processing (and with `-ro`), VRTs are built in four phases:
 
-Convert NISAR HDF5 GCOV data to Cloud Optimized GeoTIFF (COG) with optional VRT stacking.
+1. **Grid mosaic VRTs** -- when multiple frames exist for the same track/direction/cycle, a spatial mosaic VRT is built per grid variable.
 
-options:
-  -h, --help            show this help message and exit
-  -i H5 [H5 ...], --h5 H5 [H5 ...]
-                        Input H5 URL(s) or path to a text file containing
-                        URLs.
-  -o OUTPUT, --output OUTPUT
-                        Output directory path (S3 or local). Must end in '/'
-                        for batch processing.
-  -vars VARS [VARS ...], --vars VARS [VARS ...]
-                        Grid Variables to extract, e.g. HHHH HVHV. If omitted,
-                        ALL variables for the frequency are used.
-  -f {A,B}, --freq {A,B}
-                        Frequency (A/B). Default: A.
-  -lg, --list_grids     Scan the first H5 file and list all available
-                        grids/frequencies/variables, then exit.
-  -DN, --DN             Set scaling mode to DN (uint8 scaled 1-255).
-  -amp, --amp           Set scaling mode to Amplitude (uint16).
-  -dB, --dB             Set scaling mode to dB (float32).
-  -pwr, --power         Set scaling mode to Power (raw float32). Default.
-  -of {COG,GTiff,h5}, --output_format {COG,GTiff,h5}
-                        Output format: COG (default), GTiff (BigTIFF), h5.
-  -dpratio, --dualpol_ratio
-                        Compute dual-pol power ratio: HHHH/HVHV (DH mode) or
-                        VVVV/VHVH (DV mode).
-  -d DOWNSCALE, --downscale DOWNSCALE
-                        Downscale factor (integer). E.g., 2 for 2x2 block
-                        averaging.
-  --no_vrt              Disable generation of per-snapshot VRTs.
-  --no_time_series      Disable generation of Time Series VRT stacks.
-  --no_single_bands     Save multi-band COG instead of separate files per pol.
-  -srcwin XOFF YOFF XSIZE YSIZE, --srcwin XOFF YOFF XSIZE YSIZE
-                        Pixel subset window.
-  -projwin ULX ULY LRX LRY, --projwin ULX ULY LRX LRY
-                        Geographic subset window (map coordinates).
-  --no_tap              Disable pixel-grid alignment (tap).
-  -t_srs TARGET_SRS, --target_srs TARGET_SRS
-                        Target CRS for output (e.g. EPSG:4326 or bare 4326).
-  -tr XRES YRES, --target_res XRES YRES
-                        Explicit output pixel size in target CRS units.
-  --resample RESAMPLE   Resampling method for reprojection
-                        (nearest/bilinear/cubic/cubicspline/lanczos/average).
-                        Default: cubic.
-  --fill_holes          Fill interior NaN/±inf pixels with nearest valid
-                        neighbour before resampling.
-  --warp_threads N      Number of threads for reprojection. Default: all cores.
-  --read_threads N      Number of parallel S3/HTTPS connections. Default: 8.
-  --profile PROFILE     AWS Profile name (input and output).
-  --input_profile INPUT_PROFILE
-                        AWS Profile specifically for reading Input H5s.
-  --output_profile OUTPUT_PROFILE
-                        AWS Profile specifically for writing Output COGs.
-  -ro, --rebuild_only   Skip processing and ONLY rebuild VRTs in output folder.
-  -R, --rebuild_all_vrts
-                        After processing, rebuild master VRTs for ALL timesteps.
-  -S, --show_vrts       Print VRT summary grouped by type (requires -o).
-  -cache CACHE, --cache CACHE
-                        Local cache directory. Use 'y' for auto temp directory.
-  -keep, --keep_cached  Keep cached H5 file locally (use with -cache).
-  -v, --verbose         Verbose output.
-```
+2. **Single-date multi-pol VRTs** -- for each acquisition date and track, all backscatter polarizations (and ratio if present) are combined into one multi-band VRT. Band order: likepol, crosspol, ratio.
+
+3. **Per-track time-series VRTs** -- one band per date, per grid variable (backscatter or ancillary), per track. Only built when >1 timestep exists. Combined time-series VRTs across tracks are only built when all tracks share the same CRS.
+
+4. **Combined multi-track time-series VRTs** -- when >1 track exists and all tracks share the same CRS, a combined VRT interleaves all dates.
+
+VRT metadata includes `RADIOMETRY` (gamma0/sigma0), `DB_FORMULA`, `CRID`, `ISCE3_VERSION`, and `OPENSEPPO_VERSION` for backscatter VRTs. Ancillary VRTs do not include radiometry metadata.
+
+The `-S` summary output is organized into **Ancillary** and **Backscatter** sections with sub-sections for single dates, time series by track, and combined time series.
+
+---
+
+## TIF Metadata Tags
+
+Each output TIF includes GDAL tags:
+
+| Tag | Description | Applies to |
+|-----|-------------|------------|
+| `ACQUISITION_DATE` | Source H5 acquisition date | All |
+| `ACQUISITION_TIME` | Source H5 acquisition time | All |
+| `CRID` | NISAR Composite Release ID | All |
+| `ISCE3_VERSION` | ISCE3 software version | All |
+| `OPENSEPPO_VERSION` | openSEPPO package version | All |
+| `RADIOMETRY` | `gamma0` or `sigma0` | Backscatter only |
+| `DB_FORMULA` | Formula to convert pixel values to dB | Backscatter only |

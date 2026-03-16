@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """
-seppo_earthaccess_credentials — NASA Earthdata temporary AWS credential helper
+seppo_earthaccess_credentials -- NASA Earthdata temporary AWS credential helper
 *****************************************************************************
-openSEPPO — Open SEPPO Tools
+openSEPPO -- Open SEPPO Tools
 Supporting Geospatial and Remote Sensing Data Processing
 
 (c) 2026 Earth Big Data LLC  |  https://earthbigdata.com

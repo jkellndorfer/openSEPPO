@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """
-seppo_nisar_gcov_convert — NISAR GCOV HDF5 to Cloud Optimized GeoTIFF converter
+seppo_nisar_gcov_convert -- NISAR GCOV HDF5 to Cloud Optimized GeoTIFF converter
 *********************************************************************************
-openSEPPO — Open SEPPO Tools
+openSEPPO -- Open SEPPO Tools
 Supporting Geospatial and Remote Sensing Data Processing
 
 (c) 2026 Earth Big Data LLC  |  https://earthbigdata.com
@@ -38,12 +38,13 @@ import argparse
 import shlex
 from pprint import pprint
 from collections import defaultdict
+import math
 import rasterio
 from rasterio.transform import from_origin
 import openseppo.nisar.nisar_tools as nisar_tools
 
 
-# ── seppo_parse_args shim ─────────────────────────────────────────────────────
+# -- seppo_parse_args shim -----------------------------------------------------
 # Drops the config-file override feature from seppopy.tools.args; all CLI flags
 # are preserved and work identically.
 
@@ -51,7 +52,7 @@ def seppo_parse_args(parser, a):
     return parser.parse_args(a[1:])
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 asf_buckets = ["sds-n-cumulus-prod-nisar-products", "sds-n-cumulus-prod-nisar-ur-products"]
 
@@ -100,6 +101,7 @@ def myargsparse(a):
 
     # --- Other Processing Options ---
     parser.add_argument("-dpratio", "--dualpol_ratio", action="store_true", help="Compute dual-pol power ratio: HHHH/HVHV (DH mode) or VVVV/VHVH (DV mode). Incompatible with QP or single-pol acquisitions.")
+    parser.add_argument("-sigma0", "--sigma0", action="store_true", help="Convert gamma0 backscatter to sigma0 by multiplying power values with the rtcGammaToSigmaFactor layer from the GCOV file. Applied before any downscaling or resampling.")
     parser.add_argument("-d", "--downscale", type=int, default=None, help="Downscale factor (integer). E.g., 2 for 2x2 block averaging.")
 
     # --- VRT & Output Structure ---
@@ -115,18 +117,19 @@ def myargsparse(a):
     parser.add_argument("-t_srs", "--target_srs", type=str, default=None, help="Target CRS for output (e.g. EPSG:4326 or bare 4326). If omitted, output stays in native UTM CRS.")
     parser.add_argument("-tr", "--target_res", type=float, nargs=2, metavar=("XRES", "YRES"), default=None, help="Explicit output pixel size in target CRS units (e.g. -tr 0.001 0.001 for ~100m in degrees). Only used with --target_srs.")
     parser.add_argument("--resample", type=str, default="cubic", help="Resampling method for reprojection (nearest/bilinear/cubic/cubicspline/lanczos/average). Default: cubic.")
-    parser.add_argument("--fill_holes", action="store_true", help="Fill interior NaN/±inf pixels (those enclosed by valid data) with their nearest valid neighbour. Frame-boundary nodata is unaffected. Prevents the resampling kernel from seeing isolated invalid pixels inside the valid image area.")
+    parser.add_argument("--fill_holes", action="store_true", help="Fill interior NaN/+/-inf pixels (those enclosed by valid data) with their nearest valid neighbour. Frame-boundary nodata is unaffected. Prevents the resampling kernel from seeing isolated invalid pixels inside the valid image area.")
     parser.add_argument("--warp_threads", type=int, default=None, metavar="N", help="Number of threads for reprojection. Default: all available CPU cores.")
-    parser.add_argument("--read_threads", type=int, default=8, metavar="N", help="Number of parallel S3/HTTPS connections for reading HDF5 chunks. Each band×stripe gets its own connection. Default: 8.")
+    parser.add_argument("--read_threads", type=int, default=8, metavar="N", help="Number of parallel S3/HTTPS connections for reading HDF5 chunks. Each bandxstripe gets its own connection. Default: 8.")
 
     # --- Authentication (Distinct Input/Output) ---
     parser.add_argument("--profile", type=str, help="AWS Profile name (applies to both Input and Output unless overridden).")
     parser.add_argument("--input_profile", type=str, help="AWS Profile specifically for reading Input H5s.")
     parser.add_argument("--output_profile", type=str, help="AWS Profile specifically for writing Output COGs.")
     # --- Management Flags ---
-    parser.add_argument("-ro", "--rebuild_only", action="store_true", help="Skip processing and ONLY rebuild VRTs in the output folder.")
-    parser.add_argument("-R", "--rebuild_all_vrts", action="store_true", help="After processing the new files, scan the output folder and (re)build the master VRTs to include ALL timesteps (old + new).")
-    parser.add_argument("-S", "--show_vrts", action="store_true", help="Print a summary of all VRTs in the output folder grouped by type (requires -o). No processing is performed.")
+    parser.add_argument("-ro", "--rebuild_only", action="store_true", help="Skip processing and rebuild VRTs in the output folder from existing TIFs. Auto-detects scaling mode.")
+    parser.add_argument("-S", "--show_vrts", action="store_true", help="Print a summary of all VRTs and TIFs in the output folder (requires -o). Auto-detects scaling mode.")
+    parser.add_argument("-vsis3", "--vsis3", action="store_true", help="With -S: print paths as /vsis3/ URIs for direct use in QGIS/GDAL.")
+    parser.add_argument("--reset_vrts", action="store_true", help="Delete all existing VRTs in the output folder before rebuilding. Use with -ro for a clean slate.")
     parser.add_argument("-cache", "--cache", default=None, action="store", help="Local path to a directory to cache files from urls first. Accepts 'y' or 'yes' to create a local temp directory (on /dev/shm or /tmp if available).")
     parser.add_argument("-keep", "--keep_cached", action="store_true", help="Use with -cache to keep to cached h5 file locally.")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output.")
@@ -183,20 +186,30 @@ def get_auth_dict(profile_arg, use_earthdata=False):
 # =========================================================
 
 
+_KNOWN_ANC_SUFFIXES = {"mask", "nlooks", "gamma2sigma"}
+
+
 def _parse_nisar_tif_meta(tif_path):
-    """Parse NISAR metadata tokens from a COG TIF filename. Returns dict or None."""
+    """Parse NISAR metadata tokens from a COG TIF filename. Returns dict or None.
+
+    Handles both backscatter TIFs (3 EBD tokens: freq, pol, mode) and
+    ancillary TIFs (2 EBD tokens: freq, suffix like mask/nlooks/gamma2sigma).
+    """
     basename = os.path.basename(tif_path)
     if "-EBD_" not in basename:
         return None
     nisar_base, ebd_raw = basename.split("-EBD_", 1)
-    ebd_raw = ebd_raw.removesuffix(".tif")  # e.g. "A_hh_AMP"
-    ebd_tokens = ebd_raw.split("_")  # ["A", "hh", "AMP"]
-    if len(ebd_tokens) < 3:
+    if not basename.endswith(".tif"):
+        return None
+    ebd_raw = ebd_raw.removesuffix(".tif")
+    ebd_tokens = ebd_raw.split("_")  # ["A", "hh", "AMP"] or ["A", "mask"]
+    if len(ebd_tokens) < 2:
         return None
     tokens = nisar_base.split("_")
     if len(tokens) < 18 or tokens[0] != "NISAR":
         return None
     try:
+        is_anc = len(ebd_tokens) == 2 and ebd_tokens[1] in _KNOWN_ANC_SUFFIXES
         return {
             "il": tokens[1],
             "pt": tokens[2],
@@ -213,8 +226,9 @@ def _parse_nisar_tif_meta(tif_path):
             "crid": tokens[13],
             "accuracy": tokens[14],
             "freq": ebd_tokens[0],
-            "pol_str": ebd_tokens[1],
-            "mode_str": ebd_tokens[2],
+            "pol_str": ebd_tokens[1] if not is_anc else ebd_tokens[1],
+            "mode_str": ebd_tokens[2] if len(ebd_tokens) >= 3 else None,
+            "is_ancillary": is_anc,
             "path": tif_path,
             "nisar_base": nisar_base,
         }
@@ -222,29 +236,53 @@ def _parse_nisar_tif_meta(tif_path):
         return None
 
 
-def _list_nisar_tifs(output_path, frequency, mode_str, output_fs=None):
-    """List NISAR COG TIF files matching frequency and mode in output_path."""
+_KNOWN_BSC_MODES = ("pwr", "dB", "AMP", "DN")
+
+
+def _list_all_nisar_tifs(output_path, frequency, mode_str=None, output_fs=None):
+    """List all NISAR TIF files (backscatter + ancillary) in output_path.
+
+    If *mode_str* is None, auto-detect by scanning for all known modes.
+    """
     tag = f"-EBD_{frequency}_"
-    suffix = f"_{mode_str}.tif"
+    bsc_suffixes = [f"_{mode_str}.tif"] if mode_str else [f"_{m}.tif" for m in _KNOWN_BSC_MODES]
+    anc_suffixes = tuple(f"_{s}.tif" for s in _KNOWN_ANC_SUFFIXES)
+
+    def _matches(f):
+        if not f.endswith(".tif") or tag not in f:
+            return False
+        return any(f.endswith(s) for s in bsc_suffixes) or any(f.endswith(s) for s in anc_suffixes)
+
     if output_fs:
         bucket_path = output_path.replace("s3://", "")
         try:
             files = output_fs.ls(bucket_path)
-            return [f"s3://{f}" for f in files if f.endswith(".tif") and tag in f and suffix in f]
+            return [f"s3://{f}" for f in files if _matches(f)]
         except Exception:
             return []
-    return sorted(glob.glob(os.path.join(output_path, f"*{tag}*{suffix}")))
+    results = []
+    for bsuf in bsc_suffixes:
+        results.extend(glob.glob(os.path.join(output_path, f"*{tag}*{bsuf}")))
+    for s in _KNOWN_ANC_SUFFIXES:
+        results.extend(glob.glob(os.path.join(output_path, f"*{tag}{s}.tif")))
+    return sorted(set(results))
 
 
 def _read_tif_geo(tif_path, output_fs=None):
-    """Return (transform, w, h, crs_wkt, dtype) from a TIF file, or None on error."""
+    """Return dict with geo info and GDAL tags from a TIF, or None on error."""
     try:
         if output_fs:
             with output_fs.open(tif_path, "rb") as fobj:
                 with rasterio.open(fobj) as ds:
-                    return ds.transform, ds.width, ds.height, ds.crs.to_wkt(), ds.dtypes[0]
+                    tags = ds.tags()
+                    return {"transform": ds.transform, "w": ds.width, "h": ds.height,
+                            "crs_wkt": ds.crs.to_wkt(), "dtype": ds.dtypes[0],
+                            "nodata": ds.nodata, "tags": tags}
         with rasterio.open(tif_path) as ds:
-            return ds.transform, ds.width, ds.height, ds.crs.to_wkt(), ds.dtypes[0]
+            tags = ds.tags()
+            return {"transform": ds.transform, "w": ds.width, "h": ds.height,
+                    "crs_wkt": ds.crs.to_wkt(), "dtype": ds.dtypes[0],
+                    "nodata": ds.nodata, "tags": tags}
     except Exception:
         return None
 
@@ -260,20 +298,29 @@ def _vrt_src_entry(path):
     return os.path.basename(path), "1"
 
 
-def _gdal_nodata(dtype):
+def _gdal_nodata_str(nodata, dtype):
+    """Return a nodata string for VRT XML, preferring the explicit value from the TIF."""
+    if nodata is not None:
+        try:
+            if math.isnan(nodata):
+                return "nan"
+        except (TypeError, ValueError):
+            pass
+        v = int(nodata) if nodata == int(nodata) else nodata
+        return str(v)
     d = str(dtype).lower()
     return "0" if ("int" in d or "byte" in d) else "nan"
 
 
-def _generate_mosaic_vrt_xml(frame_items, crs_wkt, dtype):
+def _generate_mosaic_vrt_xml(frame_items, crs_wkt, dtype, metadata=None):
     """
     Spatial mosaic VRT: all frame_items (different extents, same date) are merged
     into a single band. Returns (xml_str, union_transform, union_w, union_h).
 
-    frame_items: [{"path", "transform", "w", "h"}]
+    frame_items: [{"path", "transform", "w", "h", "nodata"(optional)}]
     """
     vrt_dtype = nisar_tools.get_gdal_dtype(dtype)
-    nodata_val = _gdal_nodata(dtype)
+    nodata_val = _gdal_nodata_str(frame_items[0].get("nodata"), dtype)
     res_x = abs(frame_items[0]["transform"].a)
     res_y = abs(frame_items[0]["transform"].e)
 
@@ -290,6 +337,10 @@ def _generate_mosaic_vrt_xml(frame_items, crs_wkt, dtype):
         f'<VRTDataset rasterXSize="{union_w}" rasterYSize="{union_h}">',
         f'  <SRS dataAxisToSRSAxisMapping="1,2">{crs_wkt}</SRS>',
         f"  <GeoTransform>{geo}</GeoTransform>",
+    ]
+    if metadata:
+        lines.append(nisar_tools._vrt_metadata_xml(metadata))
+    lines += [
         f'  <VRTRasterBand dataType="{vrt_dtype}" band="1">',
         f"    <NoDataValue>{nodata_val}</NoDataValue>",
         f"    <ColorInterp>Gray</ColorInterp>",
@@ -316,15 +367,17 @@ def _generate_mosaic_vrt_xml(frame_items, crs_wkt, dtype):
     return "\n".join(lines), union_tf, union_w, union_h
 
 
-def _generate_ts_union_vrt_xml(crs_wkt, stack_items, dtype):
+def _generate_ts_union_vrt_xml(crs_wkt, stack_items, dtype, nodata=None, metadata=None):
     """
     Time-series VRT with union spatial extent (one band per timestep).
     Used when items have different spatial extents (e.g. A vs D tracks).
 
-    stack_items: [{"path", "band_idx", "date", "transform", "w", "h"}]
+    stack_items: [{"path", "band_idx", "date", "transform", "w", "h", "nodata"(optional)}]
     """
     vrt_dtype = nisar_tools.get_gdal_dtype(dtype)
-    nodata_val = _gdal_nodata(dtype)
+    if nodata is None:
+        nodata = stack_items[0].get("nodata")
+    nodata_val = _gdal_nodata_str(nodata, dtype)
     res_x = abs(stack_items[0]["transform"].a)
     res_y = abs(stack_items[0]["transform"].e)
 
@@ -342,6 +395,8 @@ def _generate_ts_union_vrt_xml(crs_wkt, stack_items, dtype):
         f'  <SRS dataAxisToSRSAxisMapping="1,2">{crs_wkt}</SRS>',
         f"  <GeoTransform>{geo}</GeoTransform>",
     ]
+    if metadata:
+        lines.append(nisar_tools._vrt_metadata_xml(metadata))
     for i, it in enumerate(stack_items):
         dx = int(round((it["transform"].c - union_ulx) / res_x))
         dy = int(round((union_uly - it["transform"].f) / res_y))
@@ -357,7 +412,7 @@ def _track_vrt_filename(metas, pol_str, mode_str):
     Build a NISAR time-series VRT filename from a list of metadata dicts.
 
     Unique (track, direction, frame) combos are sorted by (track, direction, frame).
-    For ≤4 combos the track, direction, and frame tokens are each hyphen-joined in
+    For <=4 combos the track, direction, and frame tokens are each hyphen-joined in
     combo order (preserving the pairing).  For >4 combos the tokens collapse to
     "999", all-directions (A, D, or A-D), "999".
     """
@@ -383,17 +438,23 @@ def _track_vrt_filename(metas, pol_str, mode_str):
     min_start = min(m["start_time"] for m in metas)
     max_end = max(m["end_time"] for m in metas)
 
+    if mode_str:
+        ebd = f"-EBD_{freq}_{pol_str}_{mode_str}.vrt"
+    else:
+        ebd = f"-EBD_{freq}_{pol_str}.vrt"
     return (f"NISAR_{il}_{pt}_{prod}_{cycle_str}_{track_str}_{dir_str}_"
             f"{frame_str}_{mode}_{pol}_{obs_mode}_{min_start}_{max_end}"
-            f"-EBD_{freq}_{pol_str}_{mode_str}.vrt")
+            f"{ebd}")
 
 
-def _make_ts_vrt(ts_items, crs_wkt, dtype):
+def _make_ts_vrt(ts_items, crs_wkt, dtype, nodata=None, metadata=None):
     """Choose between same-extent and union time-series VRT builder."""
+    if nodata is None:
+        nodata = ts_items[0].get("nodata")
     same_geo = all(it["w"] == ts_items[0]["w"] and it["h"] == ts_items[0]["h"] and it["transform"] == ts_items[0]["transform"] for it in ts_items)
     if same_geo:
-        return nisar_tools.generate_vrt_xml_timeseries(ts_items[0]["w"], ts_items[0]["h"], ts_items[0]["transform"], crs_wkt, ts_items, dtype=dtype)
-    return _generate_ts_union_vrt_xml(crs_wkt, ts_items, dtype)
+        return nisar_tools.generate_vrt_xml_timeseries(ts_items[0]["w"], ts_items[0]["h"], ts_items[0]["transform"], crs_wkt, ts_items, dtype=dtype, nodata=nodata, metadata=metadata)
+    return _generate_ts_union_vrt_xml(crs_wkt, ts_items, dtype, nodata=nodata, metadata=metadata)
 
 
 def _list_vrts_in_dir(out_dir, output_fs):
@@ -408,59 +469,14 @@ def _list_vrts_in_dir(out_dir, output_fs):
     return _glob.glob(os.path.join(out_dir, "*.vrt"))
 
 
-def _print_vrt_summary(output_path, snapshot_vrts, per_track_vrts, combined_vrts):
-    """Print a formatted VRT summary grouped for copy-paste into a GIS application."""
-    is_s3 = output_path.startswith("s3://")
-    if is_s3:
-        bucket = output_path.replace("s3://", "").split("/")[0]
-        print(f"\nBucket: {bucket}")
+def show_output_summary(output_path, frequency, output_auth=None, vsis3=False):
+    """Scan output directory and print a structured summary of existing files.
 
-        def key(p):
-            return p.replace("s3://", "").split("/", 1)[1]
-    else:
-        print(f"\nPath: {output_path.rstrip('/')}")
-
-        def key(p):
-            return p
-
-    if snapshot_vrts:
-        print()
-        print("Single dates:")
-        for p in sorted(snapshot_vrts):
-            print(key(p))
-
-    if per_track_vrts:
-        print()
-        print("Time series by track:")
-        for p in sorted(per_track_vrts):
-            print(key(p))
-
-    if combined_vrts:
-        print()
-        print("Combined time series:")
-        for p in sorted(combined_vrts):
-            print(key(p))
-
-
-def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_auth=None):
-    """
-    Post-process: build per-track (and combined) time-series VRTs, then print
-    a formatted summary of all VRTs grouped by type for GIS copy-paste.
-
-    Rules:
-      - Multiple frames for the same track+direction:
-          build a spatial mosaic VRT per cycle, then a time-series VRT over those.
-      - Single frame per track+direction:
-          build a per-track time-series VRT directly from individual TIF files.
-      - More than one (track, direction) group:
-          additionally build a combined multi-track time-series VRT with a
-          _track_frames.txt sidecar listing all track/direction/frame combos.
+    No VRTs are built or modified -- read-only listing.
     """
     import s3fs as _s3fs
 
     out_dir = output_path.rstrip("/")
-
-    # Set up filesystem
     output_fs = None
     if output_path.startswith("s3://"):
         auth = output_auth or {}
@@ -471,189 +487,463 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
         else:
             output_fs = _s3fs.S3FileSystem(anon=False)
 
+    # List all files in directory
+    if output_fs:
+        bucket_path = output_path.replace("s3://", "").rstrip("/")
+        try:
+            all_files = [f"s3://{f}" for f in output_fs.ls(bucket_path)]
+        except Exception:
+            all_files = []
+    else:
+        all_files = sorted(glob.glob(os.path.join(out_dir, "*")))
+
+    tag = f"-EBD_{frequency}"
+    tifs = [f for f in all_files if f.endswith(".tif") and tag in f]
+    vrts = [f for f in all_files if f.endswith(".vrt") and tag in f]
+
+    # Classify TIFs and VRTs into backscatter vs ancillary
+    anc_suffixes = tuple(f"_{s}.tif" for s in _KNOWN_ANC_SUFFIXES)
+    anc_vrt_suffixes = tuple(f"_{s}.vrt" for s in _KNOWN_ANC_SUFFIXES)
+
+    summary = {"backscatter": {"single_dates": [], "mosaics": [], "ts_by_track": [], "combined_ts": []},
+               "ancillary":   {"single_dates": [], "mosaics": [], "ts_by_track": [], "combined_ts": []}}
+
+    for f in tifs:
+        if any(f.endswith(s) for s in anc_suffixes):
+            summary["ancillary"]["single_dates"].append(f)
+        else:
+            summary["backscatter"]["single_dates"].append(f)
+
+    for f in vrts:
+        bn = os.path.basename(f)
+        is_anc = any(f.endswith(s) for s in anc_vrt_suffixes)
+        cat = "ancillary" if is_anc else "backscatter"
+        # Classify by name pattern
+        if "-" in bn.split("_")[4] if len(bn.split("_")) > 4 else False:
+            # Cycle range (e.g. 003-009) suggests time-series
+            summary[cat]["ts_by_track"].append(f)
+        else:
+            summary[cat]["single_dates"].append(f)
+
+    _print_vrt_summary(output_path, summary, vsis3=vsis3)
+
+
+def _green(text):
+    """Wrap text in green ANSI escape if stdout is a terminal."""
+    if hasattr(sys.stdout, "isatty") and sys.stdout.isatty():
+        return f"\033[32m{text}\033[0m"
+    return text
+
+
+def _print_vrt_summary(output_path, summary, vsis3=False):
+    """Print a structured VRT/TIF summary for copy-paste into a GIS application.
+
+    *summary* is a dict with keys "backscatter" and "ancillary", each mapping
+    to a dict with optional sub-keys:
+        "single_dates"  -- list of paths (snapshot VRTs or single-frame TIFs)
+        "mosaics"       -- list of paths (spatial mosaic VRTs)
+        "ts_by_track"   -- list of paths (per-track time-series VRTs)
+        "combined_ts"   -- list of paths (multi-track combined VRTs)
+    If *vsis3* is True, S3 paths are printed as /vsis3/ URIs for QGIS/GDAL.
+    """
+    is_s3 = output_path.startswith("s3://")
+    if is_s3:
+        bucket = output_path.replace("s3://", "").split("/")[0]
+        if vsis3:
+            print(f"\n{_green('---> /vsis3/ Path:')}")
+            print(f"/vsis3/{output_path[5:].rstrip('/')}")
+        else:
+            print(f"\n{_green('---> Bucket:')}")
+            print(bucket)
+
+        if vsis3:
+            def key(p):
+                return "/vsis3/" + p[5:] if p.startswith("s3://") else p
+        else:
+            def key(p):
+                return p.replace("s3://", "").split("/", 1)[1]
+    else:
+        print(f"\n{_green('---> Path:')}")
+        print(output_path.rstrip("/"))
+
+        def key(p):
+            return p
+
+    for section, label in [("ancillary", "Ancillary"), ("backscatter", "Backscatter")]:
+        data = summary.get(section, {})
+        singles = data.get("single_dates", [])
+        mosaics = data.get("mosaics", [])
+        ts_track = data.get("ts_by_track", [])
+        combined = data.get("combined_ts", [])
+        if not any([singles, mosaics, ts_track, combined]):
+            continue
+        print(f"\n{_green(f'---> {label}:')}")
+        for p in sorted(singles + mosaics):
+            print(key(p))
+        if ts_track:
+            print(f"\n{_green(f'---> {label} time series by track:')}")
+            for p in sorted(ts_track):
+                print(key(p))
+        if combined:
+            print(f"\n{_green(f'---> {label} combined time series:')}")
+            for p in sorted(combined):
+                print(key(p))
+
+    # Repeat path/bucket at the end for easier pasting
+    if is_s3:
+        print(f"\n{_green('---> Bucket:')}")
+        print(bucket)
+    else:
+        print(f"\n{_green('---> Path:')}")
+        print(output_path.rstrip("/"))
+
+
+def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_auth=None, vsis3=False, reset_vrts=False):
+    """
+    Post-process: build VRTs in four phases, then print a structured summary.
+
+    Phase 1 -- Grid mosaic VRTs: for each (track, dir, cycle, grid), when
+               multiple frames exist, build a spatial mosaic VRT.
+    Phase 2 -- Single-date multi-pol VRTs: for each acquisition date, combine
+               backscatter polarizations into one VRT (from mosaics or TIFs).
+    Phase 3 -- Per-track time-series VRTs: one band per date, per grid variable.
+    Phase 4 -- Combined multi-track time-series VRTs: when >1 track exists.
+    """
+    import s3fs as _s3fs
+
+    out_dir = output_path.rstrip("/")
+
+    output_fs = None
+    if output_path.startswith("s3://"):
+        auth = output_auth or {}
+        if "profile" in auth:
+            output_fs = _s3fs.S3FileSystem(profile=auth["profile"])
+        elif "key" in auth:
+            output_fs = _s3fs.S3FileSystem(key=auth["key"], secret=auth["secret"], token=auth.get("token"))
+        else:
+            output_fs = _s3fs.S3FileSystem(anon=False)
+
+    # Delete all existing VRTs if --reset_vrts requested
+    if reset_vrts:
+        if verbose:
+            print("    Deleting existing VRTs...", flush=True)
+        if output_fs:
+            bucket_path = output_path.replace("s3://", "").rstrip("/")
+            try:
+                existing = output_fs.ls(bucket_path)
+                vrt_files = [f for f in existing if f.endswith(".vrt")]
+                for vf in vrt_files:
+                    output_fs.rm(vf)
+                if verbose:
+                    print(f"    Deleted {len(vrt_files)} VRTs from S3.", flush=True)
+            except Exception:
+                pass
+        else:
+            for vf in glob.glob(os.path.join(out_dir, "*.vrt")):
+                os.remove(vf)
+                if verbose:
+                    print(f"    Deleted: {os.path.basename(vf)}", flush=True)
+
+    # For S3 output, write VRTs to a local temp dir then sync in one shot.
+    _is_s3 = output_path.startswith("s3://")
+    _local_vrt_dir = None
+    if _is_s3:
+        import tempfile as _tempfile
+        _local_vrt_dir = _tempfile.mkdtemp(prefix="openseppo_vrts_")
+
     def write_vrt(path, xml_str):
         data = xml_str.encode("utf-8")
-        if output_fs:
-            with output_fs.open(path, "wb") as fh:
+        if _local_vrt_dir:
+            local_path = os.path.join(_local_vrt_dir, os.path.basename(path))
+            with open(local_path, "wb") as fh:
                 fh.write(data)
         else:
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
             with open(path, "wb") as fh:
                 fh.write(data)
 
-    # 1. Collect TIF files and parse metadata + geometry
-    tif_files = _list_nisar_tifs(output_path, frequency, mode_str, output_fs)
-    if not tif_files:
+    def _sync_vrts_to_s3():
+        """Sync local VRT temp dir to S3 in one bulk operation."""
+        if not _local_vrt_dir or not _is_s3:
+            return
+        import subprocess
+        cmd = ["aws", "s3", "sync", _local_vrt_dir, out_dir + "/",
+               "--exclude", "*", "--include", "*.vrt", "--include", "*.txt",
+               "--no-progress"]
         if verbose:
-            print("  build_track_vrts: no matching TIF files found.")
-        return
+            print(f"    Syncing VRTs to {out_dir}/...", flush=True)
+        subprocess.run(cmd, check=True)
+        import shutil
+        shutil.rmtree(_local_vrt_dir, ignore_errors=True)
 
-    all_metas = []
+    # --- Collect all TIFs (backscatter + ancillary) and parse metadata ---
+    tif_files = _list_all_nisar_tifs(output_path, frequency, mode_str, output_fs)
+    # Parse filenames (fast, no I/O)
+    parsed = []
     for fpath in tif_files:
         meta = _parse_nisar_tif_meta(fpath)
-        if meta is None:
-            continue
-        geo = _read_tif_geo(fpath, output_fs)
+        if meta is not None:
+            parsed.append((fpath, meta))
+
+    # Read TIF geo + tags in parallel (ThreadPool for local I/O, also safe for S3)
+    # Read geo+tags from one TIF per (track, direction) group and apply to all.
+    # All TIFs in a group share the same CRS/transform/dimensions from the same
+    # source H5 + processing parameters.  Avoids N rasterio opens on S3.
+    _td_groups = defaultdict(list)
+    for fpath, meta in parsed:
+        _td_groups[(meta["track"], meta["direction"])].append((fpath, meta))
+
+    _geo_cache = {}  # (track, direction) -> geo dict
+    for (trk, dir_), group in _td_groups.items():
+        # Read geo from the first backscatter TIF (has tags like RADIOMETRY);
+        # fall back to first ancillary if no backscatter in group.
+        _sample = next((fp for fp, m in group if not m["is_ancillary"]),
+                       group[0][0])
+        geo = _read_tif_geo(_sample, output_fs)
+        if geo is not None:
+            _geo_cache[(trk, dir_)] = geo
+
+    all_metas = []
+    for fpath, meta in parsed:
+        geo = _geo_cache.get((meta["track"], meta["direction"]))
         if geo is None:
             continue
-        tf, w, h, crs_wkt, dtype = geo
-        meta.update({"transform": tf, "w": w, "h": h, "crs_wkt": crs_wkt, "dtype": dtype})
+        # Copy shared geo but keep per-file nodata from the ancillary table
+        _file_geo = dict(geo)
+        if meta["is_ancillary"]:
+            # Map suffix back to HDF5 variable name for _ANCILLARY_GRIDS lookup
+            _suffix_to_var = {v[0]: k for k, v in nisar_tools._ANCILLARY_GRIDS.items()}
+            _anc_var = _suffix_to_var.get(meta["pol_str"])
+            if _anc_var:
+                _file_geo["nodata"] = nisar_tools._ancillary_nodata(_anc_var)
+                _file_geo["dtype"] = nisar_tools._ancillary_out_dtype(_anc_var)
+        meta.update(_file_geo)
         all_metas.append(meta)
 
-    if not all_metas:
-        if verbose:
-            print("  build_track_vrts: could not read metadata from any TIF.")
+    bsc_metas = [m for m in all_metas if not m["is_ancillary"]]
+    anc_metas = [m for m in all_metas if m["is_ancillary"]]
+
+    # Check for mixed radiometry -- refuse to build VRTs if inconsistent
+    _radiometries = {m["tags"].get("RADIOMETRY") for m in bsc_metas if m.get("tags")}
+    _radiometries.discard(None)
+    if len(_radiometries) > 1:
+        print(f"  WARNING: mixed radiometry found ({_radiometries}). "
+              f"Cannot build VRTs from inconsistent data. "
+              f"Reprocess with a single radiometry setting.", file=sys.stderr)
+        _print_vrt_summary(output_path, summary={"backscatter": {}, "ancillary": {}}, vsis3=vsis3)
         return
 
-    if verbose:
-        print(f"  build_track_vrts: {len(all_metas)} TIF files across "
-              f"{len({m['track'] for m in all_metas})} track(s).")
+    # Extract VRT-level metadata from the first backscatter TIF's tags
+    _vrt_meta = {}
+    if bsc_metas:
+        _src_tags = bsc_metas[0].get("tags", {})
+        for _k in ("RADIOMETRY", "DB_FORMULA", "OPENSEPPO_VERSION", "CRID", "ISCE3_VERSION"):
+            if _k in _src_tags:
+                _vrt_meta[_k] = _src_tags[_k]
 
-    # Use CRS/dtype from first file as reference
-    ref_crs = all_metas[0]["crs_wkt"]
-    ref_dtype = all_metas[0]["dtype"]
+    if verbose and all_metas:
+        print(f"  build_track_vrts: {len(bsc_metas)} backscatter + {len(anc_metas)} ancillary TIFs "
+              f"across {len({m['track'] for m in all_metas})} track(s).")
 
-    per_track_vrts = []
-    combined_vrts = []
+    # Accumulate results for the summary display
+    summary = {"backscatter": {"single_dates": [], "mosaics": [], "ts_by_track": [], "combined_ts": []},
+               "ancillary":   {"single_dates": [], "mosaics": [], "ts_by_track": [], "combined_ts": []}}
 
-    # 2. Iterate by polarization (handles multi-pol batches independently)
-    by_pol = defaultdict(list)
-    for m in all_metas:
-        by_pol[m["pol_str"]].append(m)
+    # ======================================================================
+    # Process each category (backscatter, then ancillary) through 4 phases
+    # ======================================================================
+    for category, cat_metas in [("backscatter", bsc_metas), ("ancillary", anc_metas)]:
+        if not cat_metas:
+            continue
 
-    for pol_str, pol_metas in sorted(by_pol.items()):
-        crs_wkt = pol_metas[0]["crs_wkt"]
-        dtype = pol_metas[0]["dtype"]
+        # Group by pol_str (e.g. "hh", "hv" or "mask", "nlooks", "gamma2sigma")
+        by_pol = defaultdict(list)
+        for m in cat_metas:
+            by_pol[m["pol_str"]].append(m)
 
-        # 3. Group by (track, direction)
-        by_td = defaultdict(list)
-        for m in pol_metas:
-            by_td[(m["track"], m["direction"])].append(m)
+        # Phase 2 collector: per-track per-date sources for multi-pol VRTs
+        # Key: (track, direction, date) -> [(path, pol_str, mode_str)]
+        date_pol_sources = defaultdict(list)
 
-        # Accumulate per-(track,direction) time-series items
-        # {(track, direction): {"ts_items": [...], "metas": [...]}}
-        track_dir_ts = {}
+        for pol_str, pol_metas in sorted(by_pol.items()):
+            dtype = pol_metas[0]["dtype"]
+            _ms = pol_metas[0]["mode_str"]  # None for ancillary
 
-        for (track, direction), td_metas in sorted(by_td.items()):
-            frames_in_group = sorted({m["frame"] for m in td_metas})
+            # Group by (track, direction)
+            by_td = defaultdict(list)
+            for m in pol_metas:
+                by_td[(m["track"], m["direction"])].append(m)
 
-            if len(frames_in_group) > 1:
-                # ── Multiple frames: mosaic per cycle, then time-series over mosaics ──
-                if verbose:
-                    print(f"    Track {track:03d}/{direction}: "
-                          f"{len(frames_in_group)} frames → mosaic VRTs")
+            track_dir_ts = {}
 
-                by_cycle = defaultdict(list)
-                for m in td_metas:
-                    by_cycle[m["cycle"]].append(m)
+            for (track, direction), td_metas in sorted(by_td.items()):
+                _td_crs = td_metas[0]["crs_wkt"]  # per-track CRS
+                frames = sorted({m["frame"] for m in td_metas})
 
-                mosaic_items = []
-                for cycle, cyc_metas in sorted(by_cycle.items()):
-                    frame_items = sorted(cyc_metas, key=lambda x: x["frame"])
-                    mosaic_xml, union_tf, union_w, union_h = _generate_mosaic_vrt_xml(frame_items, crs_wkt, dtype)
-                    m0 = frame_items[0]
-                    min_fr = min(m["frame"] for m in frame_items)
-                    max_fr = max(m["frame"] for m in frame_items)
-                    min_st = min(m["start_time"] for m in frame_items)
-                    max_et = max(m["end_time"] for m in frame_items)
-                    mosaic_name = (f"NISAR_{m0['il']}_{m0['pt']}_{m0['prod']}_{cycle:03d}_{track:03d}_"
-                                   f"{direction}_{min_fr:03d}-{max_fr:03d}_{m0['mode']}_{m0['polarization']}_"
-                                   f"{m0['obs_mode']}_{min_st}_{max_et}_{m0['accuracy']}_{m0['crid']}"
-                                   f"-EBD_{frequency}_{pol_str}_{mode_str}_mosaic.vrt")
-                    mosaic_path = f"{out_dir}/{mosaic_name}"
-                    write_vrt(mosaic_path, mosaic_xml)
+                # --- Phase 1: Grid mosaic VRTs ---
+                if len(frames) > 1:
+                    by_cycle = defaultdict(list)
+                    for m in td_metas:
+                        by_cycle[m["cycle"]].append(m)
+
+                    mosaic_items = []
+                    for cycle, cyc_metas in sorted(by_cycle.items()):
+                        frame_items = sorted(cyc_metas, key=lambda x: x["frame"])
+                        cyc_frames = sorted({m["frame"] for m in frame_items})
+
+                        if len(cyc_frames) > 1:
+                            # Multiple frames in this cycle -- build spatial mosaic
+                            _mosaic_meta = _vrt_meta if category == "backscatter" else None
+                            mosaic_xml, union_tf, union_w, union_h = _generate_mosaic_vrt_xml(frame_items, _td_crs, dtype, metadata=_mosaic_meta)
+                            m0 = frame_items[0]
+                            min_fr, max_fr = cyc_frames[0], cyc_frames[-1]
+                            min_st = min(m["start_time"] for m in frame_items)
+                            max_et = max(m["end_time"] for m in frame_items)
+                            ebd = f"-EBD_{frequency}_{pol_str}_{_ms}.vrt" if _ms else f"-EBD_{frequency}_{pol_str}.vrt"
+                            mosaic_name = (f"NISAR_{m0['il']}_{m0['pt']}_{m0['prod']}_{cycle:03d}_{track:03d}_"
+                                           f"{direction}_{min_fr:03d}-{max_fr:03d}_{m0['mode']}_{m0['polarization']}_"
+                                           f"{m0['obs_mode']}_{min_st}_{max_et}_{m0['crid']}_{m0['accuracy']}"
+                                           f"{ebd}")
+                            mosaic_path = f"{out_dir}/{mosaic_name}"
+                            write_vrt(mosaic_path, mosaic_xml)
+                            summary[category]["mosaics"].append(mosaic_path)
+                            if verbose:
+                                print(f"      Mosaic: {mosaic_name}")
+
+                            ds = min_st[:8]
+                            mi = {"path": mosaic_path, "band_idx": 1,
+                                  "date": f"{ds[:4]}-{ds[4:6]}-{ds[6:]}",
+                                  "transform": union_tf, "w": union_w, "h": union_h,
+                                  "nodata": m0.get("nodata")}
+                            mosaic_items.append(mi)
+                            if category == "backscatter":
+                                date_pol_sources[(track, direction, mi["date"])].append((mosaic_path, pol_str, _ms))
+                        else:
+                            # Single frame in this cycle -- use TIF directly
+                            m = frame_items[0]
+                            ds = m["start_time"][:8]
+                            ti = {"path": m["path"], "band_idx": 1,
+                                  "date": f"{ds[:4]}-{ds[4:6]}-{ds[6:]}",
+                                  "transform": m["transform"], "w": m["w"], "h": m["h"],
+                                  "nodata": m.get("nodata")}
+                            mosaic_items.append(ti)
+                            if category == "backscatter":
+                                date_pol_sources[(track, direction, ti["date"])].append((m["path"], pol_str, _ms))
+                            summary[category]["single_dates"].append(m["path"])
+
+                    track_dir_ts[(track, direction)] = {"ts_items": mosaic_items, "metas": td_metas}
+
+                else:
+                    # Single frame -- use TIF directly
+                    sorted_metas = sorted(td_metas, key=lambda x: x["start_time"])
+                    ts_items = []
+                    for m in sorted_metas:
+                        ds = m["start_time"][:8]
+                        ti = {"path": m["path"], "band_idx": 1,
+                              "date": f"{ds[:4]}-{ds[4:6]}-{ds[6:]}",
+                              "transform": m["transform"], "w": m["w"], "h": m["h"],
+                              "nodata": m.get("nodata")}
+                        ts_items.append(ti)
+                        # Track TIF for potential multi-pol VRT (backscatter)
+                        if category == "backscatter":
+                            date_pol_sources[(track, direction, ti["date"])].append((m["path"], pol_str, _ms))
+                        # Add raw TIF to single_dates (replaced by VRT in Phase 2 if applicable)
+                        summary[category]["single_dates"].append(m["path"])
+
+                    track_dir_ts[(track, direction)] = {"ts_items": ts_items, "metas": td_metas}
+
+            # --- Phase 3: Per-track time-series VRTs ---
+            for (track, direction), info in sorted(track_dir_ts.items()):
+                ts_items = info["ts_items"]
+                td_metas = info["metas"]
+                _td_crs = td_metas[0]["crs_wkt"]
+                if len(ts_items) > 1:
+                    _ts_meta = _vrt_meta if category == "backscatter" else None
+                    ts_xml = _make_ts_vrt(ts_items, _td_crs, dtype, metadata=_ts_meta)
+                    ts_name = _track_vrt_filename(td_metas, pol_str, _ms)
+                    ts_path = f"{out_dir}/{ts_name}"
+                    write_vrt(ts_path, ts_xml)
+                    summary[category]["ts_by_track"].append(ts_path)
                     if verbose:
-                        print(f"      Mosaic VRT: {mosaic_name}")
+                        print(f"    TS VRT: {ts_name}")
 
-                    ds = min_st[:8]
-                    mosaic_items.append(
-                        {
-                            "path": mosaic_path,
-                            "band_idx": 1,
-                            "date": f"{ds[:4]}-{ds[4:6]}-{ds[6:]}",
-                            "transform": union_tf,
-                            "w": union_w,
-                            "h": union_h,
-                        }
+            # --- Phase 4: Combined multi-track VRT (only when all tracks share the same CRS) ---
+            _all_crs = {info["metas"][0]["crs_wkt"] for info in track_dir_ts.values()}
+            if len(track_dir_ts) > 1 and len(_all_crs) == 1:
+                _combined_crs = _all_crs.pop()
+                combined_items = sorted(
+                    [item for info in track_dir_ts.values() for item in info["ts_items"]],
+                    key=lambda x: x["date"],
+                )
+                if len(combined_items) > 1:
+                    combined_metas = [m for info in track_dir_ts.values() for m in info["metas"]]
+                    _c_meta = _vrt_meta if category == "backscatter" else None
+                    combined_xml = _make_ts_vrt(combined_items, _combined_crs, dtype, metadata=_c_meta)
+                    combined_name = _track_vrt_filename(combined_metas, pol_str, _ms)
+                    combined_path = f"{out_dir}/{combined_name}"
+                    write_vrt(combined_path, combined_xml)
+                    summary[category]["combined_ts"].append(combined_path)
+                    if verbose:
+                        print(f"    Combined TS VRT: {combined_name}")
+
+                    tf_combos = sorted(
+                        {(m["track"], m["direction"], m["frame"]) for m in combined_metas},
+                        key=lambda x: (x[0], x[2], x[1]),
                     )
+                    sidecar_content = "\n".join(f"{t:03d}_{d}_{f:03d}" for t, d, f in tf_combos) + "\n"
+                    sidecar_path = combined_path[:-4] + "_track_frames.txt"
+                    write_vrt(sidecar_path, sidecar_content)
 
-                ts_xml = _make_ts_vrt(mosaic_items, crs_wkt, dtype)
-                ts_name = _track_vrt_filename(td_metas, pol_str, mode_str)
-                ts_path = f"{out_dir}/{ts_name}"
-                write_vrt(ts_path, ts_xml)
-                if verbose:
-                    print(f"    TS VRT (track {track:03d}/{direction}): {ts_name}")
-                per_track_vrts.append(ts_path)
-                track_dir_ts[(track, direction)] = {"ts_items": mosaic_items, "metas": td_metas}
+        # --- Phase 2: Single-date multi-pol VRTs (backscatter only, per track) ---
+        if category == "backscatter" and date_pol_sources:
+            for (_trk, _dir, date), pol_paths in sorted(date_pol_sources.items()):
+                # Deduplicate and sort by pol_str
+                seen = set()
+                unique = []
+                for path, pstr, ms in pol_paths:
+                    if path not in seen:
+                        seen.add(path)
+                        unique.append((path, pstr, ms))
+                # Only build multi-pol VRT when >1 polarization
+                if len(unique) > 1:
+                    # Band order: likepol (hh/vv), crosspol (hv/vh), ratio last
+                    _pol_order = {"hh": 0, "vv": 0, "hv": 1, "vh": 1,
+                                  "hhhvra": 2, "vvvhra": 2}
+                    unique.sort(key=lambda x: (_pol_order.get(x[1], 1), x[1]))
+                    band_files = [p for p, _, _ in unique]
+                    band_names = [ps for _, ps, _ in unique]
+                    _tif_ms = unique[0][2]  # mode_str from TIF metadata
+                    ref_geo = _geo_cache.get((_trk, _dir))
+                    if ref_geo:
+                        tf = ref_geo["transform"]
+                        w, h = ref_geo["w"], ref_geo["h"]
+                        crs_w, dt = ref_geo["crs_wkt"], ref_geo["dtype"]
+                        nd = ref_geo["nodata"]
+                        pol_list_str = "".join(band_names)
+                        ebd = f"-EBD_{frequency}_{pol_list_str}_{_tif_ms}.vrt"
+                        src_base = os.path.basename(band_files[0])
+                        if "-EBD_" in src_base:
+                            vrt_name = src_base.split("-EBD_")[0] + ebd
+                        else:
+                            vrt_name = src_base.replace(".tif", "") + ebd
+                        vrt_path = f"{out_dir}/{vrt_name}"
+                        vrt_xml = nisar_tools.generate_vrt_xml_single_step(
+                            w, h, tf, crs_w, band_files, band_names, date, dtype=dt, nodata=nd, metadata=_vrt_meta)
+                        write_vrt(vrt_path, vrt_xml)
+                        # Replace individual pol TIFs/VRTs with the multi-pol VRT
+                        covered = set(band_files)
+                        summary["backscatter"]["single_dates"] = [
+                            p for p in summary["backscatter"]["single_dates"]
+                            if p not in covered
+                        ]
+                        summary["backscatter"]["mosaics"] = [
+                            p for p in summary["backscatter"]["mosaics"]
+                            if p not in covered
+                        ]
+                        summary["backscatter"]["single_dates"].append(vrt_path)
 
-            else:
-                # ── Single frame: build time-series directly from TIF files ──
-                sorted_metas = sorted(td_metas, key=lambda x: x["start_time"])
-                ts_items = []
-                for m in sorted_metas:
-                    ds = m["start_time"][:8]
-                    ts_items.append(
-                        {
-                            "path": m["path"],
-                            "band_idx": 1,
-                            "date": f"{ds[:4]}-{ds[4:6]}-{ds[6:]}",
-                            "transform": m["transform"],
-                            "w": m["w"],
-                            "h": m["h"],
-                        }
-                    )
-
-                ts_xml = _make_ts_vrt(ts_items, crs_wkt, dtype)
-                ts_name = _track_vrt_filename(td_metas, pol_str, mode_str)
-                ts_path = f"{out_dir}/{ts_name}"
-                write_vrt(ts_path, ts_xml)
-                if verbose:
-                    print(f"    TS VRT (track {track:03d}/{direction}): {ts_name}")
-                per_track_vrts.append(ts_path)
-                track_dir_ts[(track, direction)] = {"ts_items": ts_items, "metas": td_metas}
-
-        # 4. Combined multi-track VRT: build when more than one (track, direction) group
-        if len(track_dir_ts) > 1:
-            combined_items = sorted(
-                [item for info in track_dir_ts.values() for item in info["ts_items"]],
-                key=lambda x: x["date"],
-            )
-            combined_metas = [m for info in track_dir_ts.values() for m in info["metas"]]
-            combined_xml = _make_ts_vrt(combined_items, crs_wkt, dtype)
-            combined_name = _track_vrt_filename(combined_metas, pol_str, mode_str)
-            combined_path = f"{out_dir}/{combined_name}"
-            write_vrt(combined_path, combined_xml)
-            if verbose:
-                print(f"    Combined TS VRT: {combined_name}")
-            combined_vrts.append(combined_path)
-
-            # Sidecar: list all (track, direction, frame) combos sorted by (track, frame, dir)
-            tf_combos = sorted(
-                {(m["track"], m["direction"], m["frame"]) for m in combined_metas},
-                key=lambda x: (x[0], x[2], x[1]),
-            )
-            sidecar_content = "\n".join(f"{t:03d}_{d}_{f:03d}" for t, d, f in tf_combos) + "\n"
-            sidecar_path = combined_path[:-4] + "_track_frames.txt"
-            write_vrt(sidecar_path, sidecar_content)
-            if verbose:
-                print(f"    Sidecar: {os.path.basename(sidecar_path)}")
-
-    # 5. Collect snapshot VRTs: all .vrt files in the directory that are not
-    #    per-track, combined, or internal mosaic VRTs.
-    #    Snapshot VRTs use a multi-pol suffix (e.g. "hhhv", 4+ chars).
-    #    Any time-series VRT (old or new style) uses a single-pol suffix (2 chars).
-    import re as _re
-    _snap_pol_re = _re.compile(r"-EBD_[A-Za-z]_([a-zA-Z]{3,})_[^_]+\.vrt$")
-    ts_and_combined = set(per_track_vrts + combined_vrts)
-    all_dir_vrts = _list_vrts_in_dir(out_dir, output_fs)
-    snapshot_vrts = [
-        p for p in all_dir_vrts
-        if p not in ts_and_combined
-        and not p.endswith("_mosaic.vrt")
-        and _snap_pol_re.search(os.path.basename(p))
-    ]
-
-    _print_vrt_summary(output_path, snapshot_vrts, per_track_vrts, combined_vrts)
+    _sync_vrts_to_s3()
+    _print_vrt_summary(output_path, summary, vsis3=vsis3)
 
 
 def processing(args):
@@ -661,30 +951,26 @@ def processing(args):
     output_profile = args.output_profile if args.output_profile else args.profile
     output_auth = get_auth_dict(output_profile, use_earthdata=False)  # Output unlikely to be Earthdata
 
-    # 2a. Logic: Show VRTs Only (Immediate Exit)
+    # 2a. Logic: Show Output Summary Only (Immediate Exit, read-only)
     if args.show_vrts:
-        build_track_vrts(
+        show_output_summary(
             output_path=args.output,
             frequency=args.freq,
-            mode_str=args.mode if args.mode else "pwr",
-            verbose=False,
             output_auth=output_auth,
+            vsis3=args.vsis3,
         )
         return
 
     # 2b. Logic: Rebuild Only (Immediate Exit)
     if args.rebuild_only:
         print(f"Rebuilding VRTs in {args.output}...")
-        # Rebuild per-date snapshot VRTs only (time-series handled by build_track_vrts below)
-        res = nisar_tools.rebuild_vrts(output_path=args.output, variable_names=args.vars, transform_mode=args.mode, frequency=args.freq, auth_config=output_auth, verbose=args.verbose, build_ts=False)
-        print(res)
-        print("\nBuilding per-track time series VRTs...")
         build_track_vrts(
             output_path=args.output,
             frequency=args.freq,
-            mode_str=args.mode if args.mode else "pwr",
+            mode_str=None,  # auto-detect from existing TIFs
             verbose=args.verbose,
             output_auth=output_auth,
+            reset_vrts=args.reset_vrts,
         )
         return
 
@@ -734,7 +1020,7 @@ def processing(args):
     print(f"Mode: {args.mode} | Freq: {args.freq} | Downscale: {args.downscale}")
 
     try:
-        result = nisar_tools.process_chunk_task(h5_url=urls, variable_names=args.vars, output_path=args.output, srcwin=tuple(args.srcwin) if args.srcwin else None, projwin=tuple(args.projwin) if args.projwin else None, transform_mode=args.mode, frequency=args.freq, single_bands=args.single_bands, vrt=(not args.no_vrt), downscale_factor=args.downscale, target_align_pixels=(not args.no_tap), input_auth=input_auth, output_auth=output_auth, time_series_vrt=(not args.no_time_series), list_grids=args.list_grids, verbose=args.verbose, cache=args.cache, keep=args.keep_cached, target_srs=args.target_srs, target_res=args.target_res, resample=args.resample, output_format=args.output_format, fill_holes=args.fill_holes, num_threads=args.warp_threads, read_threads=args.read_threads, dualpol_ratio=args.dualpol_ratio)
+        result = nisar_tools.process_chunk_task(h5_url=urls, variable_names=args.vars, output_path=args.output, srcwin=tuple(args.srcwin) if args.srcwin else None, projwin=tuple(args.projwin) if args.projwin else None, transform_mode=args.mode, frequency=args.freq, single_bands=args.single_bands, vrt=(not args.no_vrt), downscale_factor=args.downscale, target_align_pixels=(not args.no_tap), input_auth=input_auth, output_auth=output_auth, time_series_vrt=(not args.no_time_series), list_grids=args.list_grids, verbose=args.verbose, cache=args.cache, keep=args.keep_cached, target_srs=args.target_srs, target_res=args.target_res, resample=args.resample, output_format=args.output_format, fill_holes=args.fill_holes, num_threads=args.warp_threads, read_threads=args.read_threads, dualpol_ratio=args.dualpol_ratio, sigma0=args.sigma0)
         print("\n" + str(result))
 
         # 5. Build per-track (and combined A+D) time-series VRTs
@@ -747,12 +1033,6 @@ def processing(args):
                 verbose=args.verbose,
                 output_auth=output_auth,
             )
-
-        # 6. Conditional Rebuild (Post-Processing)
-        if args.rebuild_all_vrts:
-            print(f"\n[Triggered] Rebuilding snapshot VRTs in {args.output} to include new timesteps...")
-            rebuild_res = nisar_tools.rebuild_vrts(output_path=args.output, variable_names=args.vars, transform_mode=args.mode, frequency=args.freq, auth_config=output_auth, verbose=args.verbose, build_ts=False)
-            print(rebuild_res)
 
     except Exception as e:
         print(f"\nCRITICAL FAILURE: {e}")

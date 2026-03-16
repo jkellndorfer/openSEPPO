@@ -16,10 +16,10 @@ The individual like-pol and cross-pol bands are always written alongside the rat
 
 | File | Content |
 |---|---|
-| `…-EBD_A_hh_<MODE>.tif` | Like-pol (HHHH) |
-| `…-EBD_A_hv_<MODE>.tif` | Cross-pol (HVHV) |
-| `…-EBD_A_hhhvra_<MODE>.tif` | Ratio band |
-| `…-EBD_A_hhhvra_<MODE>.vrt` | 3-band snapshot VRT |
+| `...-EBD_A_hh_<MODE>.tif` | Like-pol (HHHH) |
+| `...-EBD_A_hv_<MODE>.tif` | Cross-pol (HVHV) |
+| `...-EBD_A_hhhvra_<MODE>.tif` | Ratio band |
+| `...-EBD_A_hhhvra_<MODE>.vrt` | 3-band snapshot VRT |
 
 With `--no_single_bands` the output is a single 3-band COG (band 1 = like-pol, band 2 = cross-pol, band 3 = ratio), useful for browse images (e.g. `-DN -d 20 --no_single_bands -dpratio`).
 
@@ -27,10 +27,10 @@ With `--no_single_bands` the output is a single 3-band COG (band 1 = like-pol, b
 
 | Mode | Formula | Output dtype | Nodata | Clamp |
 |---|---|---|---|---|
-| `-pwr` (default) | `likepol / crosspol` | float32 | nan | — |
-| `-amp` | `amp(likepol) / amp(crosspol) × 1000` | uint16 | 0 | [1, 65535] |
-| `-DN` | `DN(likepol) − DN(crosspol) + 127` | uint8 | 0 | [1, 255] |
-| `-dB` | `dB(likepol) − dB(crosspol)` | float32 | nan | — |
+| `-pwr` (default) | `likepol / crosspol` | float32 | nan | -- |
+| `-amp` | `amp(likepol) / amp(crosspol) x 1000` | uint16 | 0 | [1, 65535] |
+| `-DN` | `DN(likepol) - DN(crosspol) + 127` | uint8 | 0 | [1, 255] |
+| `-dB` | `dB(likepol) - dB(crosspol)` | float32 | nan | -- |
 
 For `-amp` and `-DN` the nodata mask is determined before clamping (pixels where the denominator or either input is 0 or non-finite).
 Clamping is then applied to valid pixels and nodata pixels are set to 0 last, so clamping never accidentally promotes a valid 0 to 1.

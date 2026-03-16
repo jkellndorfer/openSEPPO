@@ -1,4 +1,4 @@
-# seppo_nisar_search — CLI Reference
+# seppo_nisar_search -- CLI Reference
 
 Search NISAR product URLs via NASA Earthdata CMR (earthaccess).
 
@@ -43,7 +43,7 @@ All filters accept one or more values.
 | Argument | Description |
 |----------|-------------|
 | `--product CODE [CODE ...]` | Product type(s). Default: `GCOV`. Other values: `RSLC`, `GSLC`, `SME2`, `RIFG`, `RUNW`, `GUNW`, `ROFF`, `GOFF`. |
-| `--short_name NAME` | CMR short name — overrides auto-construction from `--inst_level` + `--product` (e.g. `NISAR_L2_GCOV`). |
+| `--short_name NAME` | CMR short name -- overrides auto-construction from `--inst_level` + `--product` (e.g. `NISAR_L2_GCOV`). |
 | `--track INT [INT ...]` | Track / relative-orbit number(s). |
 | `--direction A\|D` | Flight direction: `A` (ascending) or `D` (descending). |
 | `--frame INT [INT ...]` | Frame number(s). |
@@ -79,9 +79,9 @@ ISO 8601 format: `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM:SS`. Only for single-acquisit
 | `--ullr UL_LON UL_LAT LR_LON LR_LAT` | Bounding box from upper-left / lower-right corners. |
 | `--bbox MIN_LON MIN_LAT MAX_LON MAX_LAT` | Bounding box in (xmin ymin xmax ymax) order. |
 | `--point LON LAT` | Point in WGS84 lon/lat. Use `--buffer` for radius search. |
-| `--wkt WKT` | OGC WKT geometry in WGS84 (POINT, POLYGON, MULTIPOLYGON, …). |
+| `--wkt WKT` | OGC WKT geometry in WGS84 (POINT, POLYGON, MULTIPOLYGON, ...). |
 | `--geojson FILE` | GeoJSON file. First feature used unless `--union_geojson`. |
-| `--buffer DEG` | Buffer radius in degrees for `--point` (1° ≈ 111 km). |
+| `--buffer DEG` | Buffer radius in degrees for `--point` (1 deg ~ 111 km). |
 | `--union_geojson` | Union all GeoJSON features into a single geometry. |
 
 ### Output
@@ -124,7 +124,7 @@ seppo_nisar_search --point -105.5 45.2 --buffer 2.0
 # WKT polygon
 seppo_nisar_search --wkt "POLYGON((-120 40,-100 40,-100 50,-120 50,-120 40))"
 
-# GeoJSON file — union all features
+# GeoJSON file -- union all features
 seppo_nisar_search --geojson aoi.geojson --union_geojson --group
 
 # Grouped output to a directory (one file per track/dir/frame)
@@ -174,7 +174,7 @@ usage: nisar_search.py [-h] [--bucket [TEXT ...]] [--mission [CODE ...]]
                        [--format {url,csv,json,geojson,kml}]
                        [--columns [COL ...]] [--limit N] [-v] [--dryrun]
 
-SEPPO – Search NISAR product URLs via NASA Earthdata CMR (earthaccess).
+SEPPO - Search NISAR product URLs via NASA Earthdata CMR (earthaccess).
 Credentials are read from the netrc; an interactive prompt is shown if
 no entry is found.  Use --dryrun to inspect the CMR query without logging in.
 For --format url: s3:// by default, --https for https:// URLs.
@@ -194,7 +194,7 @@ Column / metadata filters (all accept one or more values):
                         Product type(s) (e.g. GCOV RSLC GSLC SME2 RIFG RUNW
                         GUNW ROFF GOFF) (default: ['GCOV'])
   --short_name [NAME ...]
-                        CMR short name(s) – overrides auto-construction from
+                        CMR short name(s) - overrides auto-construction from
                         --inst_level + --product. E.g. NISAR_L2_GCOV
   --cycle [INT ...]     Reference cycle number(s)
   --cycle2 [INT ...]    Secondary cycle number(s) for pair-acquisition products
@@ -232,7 +232,7 @@ Spatial filters:
                         Bounding box in (xmin ymin xmax ymax) order
   --point LON LAT       Point in WGS84 lon/lat
   --geojson FILE        GeoJSON file. First feature used unless --union_geojson.
-  --buffer DEG          Buffer radius in degrees for --point (1° ~ 111 km)
+  --buffer DEG          Buffer radius in degrees for --point (1 deg ~ 111 km)
   --union_geojson       Union all GeoJSON features into a single geometry
 
 Output:

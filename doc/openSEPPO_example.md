@@ -271,14 +271,14 @@ nisar_gcov_convert._main(cmd)
     COLLECTING RESULTS | :   0%|          | 0/1 [00:00<?, ?it/s]
 
 
-        [t] data read (2×2285×1638, 29.9 MB): 38.9s
+        [t] data read (2x2285x1638, 29.9 MB): 38.9s
         Using explicit target resolution: 0.0002 x 0.0002
         Reprojecting 2 bands...
         Transforming: AMP (Mode: amp)
         Writing separate bands...
         [t] COG write (2 bands, 0.0 MB): 8.1s
         Generated Snapshot VRT: s3://seppo1-data/NISAR/openSEPPO_testoutput-amp/NISAR_L2_PR_GCOV_004_104_A_025_4005_DHDH_A_20251105T094341_20251105T094416_X05009_N_F_J_001-EBD_A_hhhv_AMP.vrt
-        ✓ Complete (standard (all-bands) mode)
+        [OK] Complete (standard (all-bands) mode)
     --> Processing File: NISAR_L2_PR_GCOV_005_104_A_025_4005_DHDH_A_20251117T094342_20251117T094417_X05009_N_F_J_001.h5
 
 
@@ -314,14 +314,14 @@ nisar_gcov_convert._main(cmd)
     COLLECTING RESULTS | :   0%|          | 0/1 [00:00<?, ?it/s]
 
 
-        [t] data read (2×2285×1638, 29.9 MB): 41.8s
+        [t] data read (2x2285x1638, 29.9 MB): 41.8s
         Using explicit target resolution: 0.0002 x 0.0002
         Reprojecting 2 bands...
         Transforming: AMP (Mode: amp)
         Writing separate bands...
         [t] COG write (2 bands, 0.0 MB): 1.9s
         Generated Snapshot VRT: s3://seppo1-data/NISAR/openSEPPO_testoutput-amp/NISAR_L2_PR_GCOV_005_104_A_025_4005_DHDH_A_20251117T094342_20251117T094417_X05009_N_F_J_001-EBD_A_hhhv_AMP.vrt
-        ✓ Complete (standard (all-bands) mode)
+        [OK] Complete (standard (all-bands) mode)
     --> Processing File: NISAR_L2_PR_GCOV_006_104_A_025_4005_DHDH_A_20251129T094342_20251129T094417_X05009_N_F_J_001.h5
 
 
@@ -357,14 +357,14 @@ nisar_gcov_convert._main(cmd)
     COLLECTING RESULTS | :   0%|          | 0/1 [00:00<?, ?it/s]
 
 
-        [t] data read (2×2285×1638, 29.9 MB): 36.1s
+        [t] data read (2x2285x1638, 29.9 MB): 36.1s
         Using explicit target resolution: 0.0002 x 0.0002
         Reprojecting 2 bands...
         Transforming: AMP (Mode: amp)
         Writing separate bands...
         [t] COG write (2 bands, 0.0 MB): 2.0s
         Generated Snapshot VRT: s3://seppo1-data/NISAR/openSEPPO_testoutput-amp/NISAR_L2_PR_GCOV_006_104_A_025_4005_DHDH_A_20251129T094342_20251129T094417_X05009_N_F_J_001-EBD_A_hhhv_AMP.vrt
-        ✓ Complete (standard (all-bands) mode)
+        [OK] Complete (standard (all-bands) mode)
     --> Processing File: NISAR_L2_PR_GCOV_007_104_A_025_4005_DHDH_A_20251211T094343_20251211T094418_X05009_N_F_J_001.h5
 
 
@@ -400,14 +400,14 @@ nisar_gcov_convert._main(cmd)
     COLLECTING RESULTS | :   0%|          | 0/1 [00:00<?, ?it/s]
 
 
-        [t] data read (2×2285×1638, 29.9 MB): 39.4s
+        [t] data read (2x2285x1638, 29.9 MB): 39.4s
         Using explicit target resolution: 0.0002 x 0.0002
         Reprojecting 2 bands...
         Transforming: AMP (Mode: amp)
         Writing separate bands...
         [t] COG write (2 bands, 0.0 MB): 1.7s
         Generated Snapshot VRT: s3://seppo1-data/NISAR/openSEPPO_testoutput-amp/NISAR_L2_PR_GCOV_007_104_A_025_4005_DHDH_A_20251211T094343_20251211T094418_X05009_N_F_J_001-EBD_A_hhhv_AMP.vrt
-        ✓ Complete (standard (all-bands) mode)
+        [OK] Complete (standard (all-bands) mode)
     --> Processing File: NISAR_L2_PR_GCOV_008_104_A_025_4005_DHDH_A_20251223T094343_20251223T094418_X05009_N_F_J_001.h5
 
 
@@ -443,14 +443,14 @@ nisar_gcov_convert._main(cmd)
     COLLECTING RESULTS | :   0%|          | 0/1 [00:00<?, ?it/s]
 
 
-        [t] data read (2×2285×1638, 29.9 MB): 40.6s
+        [t] data read (2x2285x1638, 29.9 MB): 40.6s
         Using explicit target resolution: 0.0002 x 0.0002
         Reprojecting 2 bands...
         Transforming: AMP (Mode: amp)
         Writing separate bands...
         [t] COG write (2 bands, 0.0 MB): 1.8s
         Generated Snapshot VRT: s3://seppo1-data/NISAR/openSEPPO_testoutput-amp/NISAR_L2_PR_GCOV_008_104_A_025_4005_DHDH_A_20251223T094343_20251223T094418_X05009_N_F_J_001-EBD_A_hhhv_AMP.vrt
-        ✓ Complete (standard (all-bands) mode)
+        [OK] Complete (standard (all-bands) mode)
     --> Processing File: NISAR_L2_PR_GCOV_010_104_A_025_4005_DHDH_A_20260116T094344_20260116T094419_X05010_N_F_J_001.h5
 
 
@@ -486,14 +486,14 @@ nisar_gcov_convert._main(cmd)
     COLLECTING RESULTS | :   0%|          | 0/1 [00:00<?, ?it/s]
 
 
-        [t] data read (2×2285×1638, 29.9 MB): 39.6s
+        [t] data read (2x2285x1638, 29.9 MB): 39.6s
         Using explicit target resolution: 0.0002 x 0.0002
         Reprojecting 2 bands...
         Transforming: AMP (Mode: amp)
         Writing separate bands...
         [t] COG write (2 bands, 0.0 MB): 7.9s
         Generated Snapshot VRT: s3://seppo1-data/NISAR/openSEPPO_testoutput-amp/NISAR_L2_PR_GCOV_010_104_A_025_4005_DHDH_A_20260116T094344_20260116T094419_X05010_N_F_J_001-EBD_A_hhhv_AMP.vrt
-        ✓ Complete (standard (all-bands) mode)
+        [OK] Complete (standard (all-bands) mode)
     Generating Time Series VRTs...
       --> VRT: NISAR_L2_PR_GCOV_004_104_A_025_4005_DHDH_A_20251105T000000_20260116T235959_X05009_N_F_J_001-EBD_A_hh_AMP.vrt
       --> VRT: NISAR_L2_PR_GCOV_004_104_A_025_4005_DHDH_A_20251105T000000_20260116T235959_X05009_N_F_J_001-EBD_A_hv_AMP.vrt
