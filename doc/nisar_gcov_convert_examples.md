@@ -251,13 +251,38 @@ seppo_nisar_gcov_convert -i file.h5 -o out/ -of h5
 
 ---
 
-## VRT time-series management
+## Ancillary grids
 
-By default, per-snapshot VRTs and a multi-temporal time-series VRT stack are
-generated alongside the COGs.
+Include `mask`, `numberOfLooks`, and/or `rtcGammaToSigmaFactor` in `--vars` to
+extract ancillary layers alongside backscatter. Each ancillary grid receives
+specialized downscaling and resampling:
 
 ```bash
-# Disable per-snapshot VRTs (time-series VRT still built from COG filenames)
+# Backscatter + all ancillary layers
+seppo_nisar_gcov_convert -i file.h5 -o out/ -amp \
+    --vars HHHH HVHV mask numberOfLooks rtcGammaToSigmaFactor
+
+# Ancillary layers only (no backscatter scaling applied)
+seppo_nisar_gcov_convert -i file.h5 -o out/ \
+    --vars mask numberOfLooks rtcGammaToSigmaFactor
+```
+
+Ancillary grids bypass `-amp`/`-dB`/`-DN` scaling and are always written as
+separate TIFs with their own suffix (`_mask.tif`, `_nlooks.tif`, `_gamma2sigma.tif`).
+
+**Note:** When `-dpratio` is active, ancillary grids are automatically excluded
+to save memory. Process them in a separate run without `-dpratio`.
+
+---
+
+## VRT and output management
+
+After processing, VRTs are built automatically in four phases:
+grid mosaics (multi-frame), single-date multi-pol, per-track time-series,
+and combined multi-track time-series (only when all tracks share the same CRS).
+
+```bash
+# Disable per-snapshot VRTs
 seppo_nisar_gcov_convert -i file.h5 -o out/ --no_vrt
 
 # Disable time-series VRT stack
@@ -266,15 +291,14 @@ seppo_nisar_gcov_convert -i file.h5 -o out/ --no_time_series
 # Save multi-band COG (one file, bands = polarizations) instead of separate files
 seppo_nisar_gcov_convert -i file.h5 -o out/ --no_single_bands
 
-# Rebuild VRTs for all existing COGs in the output folder (no reprocessing)
+# Rebuild all VRTs from existing TIFs (auto-detects scaling mode)
 seppo_nisar_gcov_convert -o out/ -ro
 
-# After manually adding or copying a new COG timestep into the output folder,
-# rebuild all VRTs to pick up the new file without reprocessing anything
-seppo_nisar_gcov_convert -o s3://my-bucket/nisar/dB/ -ro -dB
+# Show summary of all VRTs and TIFs without processing or rebuilding
+seppo_nisar_gcov_convert -o s3://my-bucket/nisar/out/ -S
 
-# Process new files AND rebuild top-level VRTs to include all old + new timesteps
-seppo_nisar_gcov_convert -i new.h5 -o out/ -R
+# Show summary with /vsis3/ paths for direct paste into QGIS
+seppo_nisar_gcov_convert -o s3://my-bucket/nisar/out/ -S -vsis3
 ```
 
 ---

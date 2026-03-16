@@ -126,9 +126,10 @@ def myargsparse(a):
     parser.add_argument("--input_profile", type=str, help="AWS Profile specifically for reading Input H5s.")
     parser.add_argument("--output_profile", type=str, help="AWS Profile specifically for writing Output COGs.")
     # --- Management Flags ---
-    parser.add_argument("-ro", "--rebuild_only", action="store_true", help="Skip processing and ONLY rebuild VRTs in the output folder.")
-    parser.add_argument("-S", "--show_vrts", action="store_true", help="Print a summary of all VRTs and TIFs in the output folder (requires -o). No processing is performed.")
+    parser.add_argument("-ro", "--rebuild_only", action="store_true", help="Skip processing and rebuild VRTs in the output folder from existing TIFs. Auto-detects scaling mode.")
+    parser.add_argument("-S", "--show_vrts", action="store_true", help="Print a summary of all VRTs and TIFs in the output folder (requires -o). Auto-detects scaling mode.")
     parser.add_argument("-vsis3", "--vsis3", action="store_true", help="With -S: print paths as /vsis3/ URIs for direct use in QGIS/GDAL.")
+    parser.add_argument("--reset_vrts", action="store_true", help="Delete all existing VRTs in the output folder before rebuilding. Use with -ro for a clean slate.")
     parser.add_argument("-cache", "--cache", default=None, action="store", help="Local path to a directory to cache files from urls first. Accepts 'y' or 'yes' to create a local temp directory (on /dev/shm or /tmp if available).")
     parser.add_argument("-keep", "--keep_cached", action="store_true", help="Use with -cache to keep to cached h5 file locally.")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output.")
@@ -538,7 +539,7 @@ def _print_vrt_summary(output_path, summary, vsis3=False):
         print(output_path.rstrip("/"))
 
 
-def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_auth=None, vsis3=False):
+def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_auth=None, vsis3=False, reset_vrts=False):
     """
     Post-process: build VRTs in four phases, then print a structured summary.
 
@@ -562,6 +563,27 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
             output_fs = _s3fs.S3FileSystem(key=auth["key"], secret=auth["secret"], token=auth.get("token"))
         else:
             output_fs = _s3fs.S3FileSystem(anon=False)
+
+    # Delete all existing VRTs if --reset_vrts requested
+    if reset_vrts:
+        if verbose:
+            print("    Deleting existing VRTs...", flush=True)
+        if output_fs:
+            bucket_path = output_path.replace("s3://", "").rstrip("/")
+            try:
+                existing = output_fs.ls(bucket_path)
+                vrt_files = [f for f in existing if f.endswith(".vrt")]
+                for vf in vrt_files:
+                    output_fs.rm(vf)
+                if verbose:
+                    print(f"    Deleted {len(vrt_files)} VRTs from S3.", flush=True)
+            except Exception:
+                pass
+        else:
+            for vf in glob.glob(os.path.join(out_dir, "*.vrt")):
+                os.remove(vf)
+                if verbose:
+                    print(f"    Deleted: {os.path.basename(vf)}", flush=True)
 
     # For S3 output, write VRTs to a local temp dir then sync in one shot.
     _is_s3 = output_path.startswith("s3://")
@@ -708,32 +730,47 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
                     mosaic_items = []
                     for cycle, cyc_metas in sorted(by_cycle.items()):
                         frame_items = sorted(cyc_metas, key=lambda x: x["frame"])
-                        _mosaic_meta = _vrt_meta if category == "backscatter" else None
-                        mosaic_xml, union_tf, union_w, union_h = _generate_mosaic_vrt_xml(frame_items, _td_crs, dtype, metadata=_mosaic_meta)
-                        m0 = frame_items[0]
-                        min_fr = min(m["frame"] for m in frame_items)
-                        max_fr = max(m["frame"] for m in frame_items)
-                        min_st = min(m["start_time"] for m in frame_items)
-                        max_et = max(m["end_time"] for m in frame_items)
-                        ebd = f"-EBD_{frequency}_{pol_str}_{_ms}.vrt" if _ms else f"-EBD_{frequency}_{pol_str}.vrt"
-                        mosaic_name = (f"NISAR_{m0['il']}_{m0['pt']}_{m0['prod']}_{cycle:03d}_{track:03d}_"
-                                       f"{direction}_{min_fr:03d}-{max_fr:03d}_{m0['mode']}_{m0['polarization']}_"
-                                       f"{m0['obs_mode']}_{min_st}_{max_et}_{m0['crid']}_{m0['accuracy']}"
-                                       f"{ebd}")
-                        mosaic_path = f"{out_dir}/{mosaic_name}"
-                        write_vrt(mosaic_path, mosaic_xml)
-                        summary[category]["mosaics"].append(mosaic_path)
-                        if verbose:
-                            print(f"      Mosaic: {mosaic_name}")
+                        cyc_frames = sorted({m["frame"] for m in frame_items})
 
-                        ds = min_st[:8]
-                        mi = {"path": mosaic_path, "band_idx": 1,
-                              "date": f"{ds[:4]}-{ds[4:6]}-{ds[6:]}",
-                              "transform": union_tf, "w": union_w, "h": union_h,
-                              "nodata": m0.get("nodata")}
-                        mosaic_items.append(mi)
-                        if category == "backscatter":
-                            date_pol_sources[(track, direction, mi["date"])].append((mosaic_path, pol_str, _ms))
+                        if len(cyc_frames) > 1:
+                            # Multiple frames in this cycle -- build spatial mosaic
+                            _mosaic_meta = _vrt_meta if category == "backscatter" else None
+                            mosaic_xml, union_tf, union_w, union_h = _generate_mosaic_vrt_xml(frame_items, _td_crs, dtype, metadata=_mosaic_meta)
+                            m0 = frame_items[0]
+                            min_fr, max_fr = cyc_frames[0], cyc_frames[-1]
+                            min_st = min(m["start_time"] for m in frame_items)
+                            max_et = max(m["end_time"] for m in frame_items)
+                            ebd = f"-EBD_{frequency}_{pol_str}_{_ms}.vrt" if _ms else f"-EBD_{frequency}_{pol_str}.vrt"
+                            mosaic_name = (f"NISAR_{m0['il']}_{m0['pt']}_{m0['prod']}_{cycle:03d}_{track:03d}_"
+                                           f"{direction}_{min_fr:03d}-{max_fr:03d}_{m0['mode']}_{m0['polarization']}_"
+                                           f"{m0['obs_mode']}_{min_st}_{max_et}_{m0['crid']}_{m0['accuracy']}"
+                                           f"{ebd}")
+                            mosaic_path = f"{out_dir}/{mosaic_name}"
+                            write_vrt(mosaic_path, mosaic_xml)
+                            summary[category]["mosaics"].append(mosaic_path)
+                            if verbose:
+                                print(f"      Mosaic: {mosaic_name}")
+
+                            ds = min_st[:8]
+                            mi = {"path": mosaic_path, "band_idx": 1,
+                                  "date": f"{ds[:4]}-{ds[4:6]}-{ds[6:]}",
+                                  "transform": union_tf, "w": union_w, "h": union_h,
+                                  "nodata": m0.get("nodata")}
+                            mosaic_items.append(mi)
+                            if category == "backscatter":
+                                date_pol_sources[(track, direction, mi["date"])].append((mosaic_path, pol_str, _ms))
+                        else:
+                            # Single frame in this cycle -- use TIF directly
+                            m = frame_items[0]
+                            ds = m["start_time"][:8]
+                            ti = {"path": m["path"], "band_idx": 1,
+                                  "date": f"{ds[:4]}-{ds[4:6]}-{ds[6:]}",
+                                  "transform": m["transform"], "w": m["w"], "h": m["h"],
+                                  "nodata": m.get("nodata")}
+                            mosaic_items.append(ti)
+                            if category == "backscatter":
+                                date_pol_sources[(track, direction, ti["date"])].append((m["path"], pol_str, _ms))
+                            summary[category]["single_dates"].append(m["path"])
 
                     track_dir_ts[(track, direction)] = {"ts_items": mosaic_items, "metas": td_metas}
 
@@ -876,6 +913,7 @@ def processing(args):
             mode_str=None,  # auto-detect from existing TIFs
             verbose=args.verbose,
             output_auth=output_auth,
+            reset_vrts=args.reset_vrts,
         )
         return
 

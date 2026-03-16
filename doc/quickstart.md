@@ -85,8 +85,9 @@ out/
 
 ## Optional: ancillary layers
 
-Extract mask, number of looks, and the gamma-to-sigma conversion factor
-(no backscatter scaling applied):
+Extract mask, number of looks, and the gamma-to-sigma conversion factor.
+Ancillary grids bypass backscatter scaling and receive specialized
+downscaling (mask: priority 255>0>subswath, numberOfLooks: sum):
 
 ```bash
 seppo_nisar_gcov_convert -i urls.txt -o out_anc/ \
@@ -94,6 +95,8 @@ seppo_nisar_gcov_convert -i urls.txt -o out_anc/ \
     --vars mask numberOfLooks rtcGammaToSigmaFactor \
     -v
 ```
+
+Output: `_mask.tif` (uint8, nodata=255), `_nlooks.tif` (float32), `_gamma2sigma.tif` (float32).
 
 ---
 
@@ -107,6 +110,15 @@ seppo_nisar_gcov_convert -i urls.txt -o out/ -dB -v
 seppo_nisar_gcov_convert -i urls.txt -o out/ \
     -DN -dpratio --no_single_bands \
     -t_srs 4326 -tr 0.001 0.001
+
+# Sigma0 conversion
+seppo_nisar_gcov_convert -i urls.txt -o out/ -sigma0 -amp
+
+# Rebuild VRTs from existing TIFs (auto-detects mode)
+seppo_nisar_gcov_convert -o out/ -ro
+
+# Show output summary with /vsis3/ paths for QGIS
+seppo_nisar_gcov_convert -o s3://my-bucket/out/ -S -vsis3
 ```
 
 ---
