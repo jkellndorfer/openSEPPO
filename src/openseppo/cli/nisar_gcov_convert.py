@@ -862,7 +862,7 @@ def processing(args):
         build_track_vrts(
             output_path=args.output,
             frequency=args.freq,
-            mode_str=args.mode if args.mode else "pwr",
+            mode_str=None,  # auto-detect from existing TIFs
             verbose=args.verbose,
             output_auth=output_auth,
         )
