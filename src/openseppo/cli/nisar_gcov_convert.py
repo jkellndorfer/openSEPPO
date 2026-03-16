@@ -469,6 +469,65 @@ def _list_vrts_in_dir(out_dir, output_fs):
     return _glob.glob(os.path.join(out_dir, "*.vrt"))
 
 
+def show_output_summary(output_path, frequency, output_auth=None, vsis3=False):
+    """Scan output directory and print a structured summary of existing files.
+
+    No VRTs are built or modified -- read-only listing.
+    """
+    import s3fs as _s3fs
+
+    out_dir = output_path.rstrip("/")
+    output_fs = None
+    if output_path.startswith("s3://"):
+        auth = output_auth or {}
+        if "profile" in auth:
+            output_fs = _s3fs.S3FileSystem(profile=auth["profile"])
+        elif "key" in auth:
+            output_fs = _s3fs.S3FileSystem(key=auth["key"], secret=auth["secret"], token=auth.get("token"))
+        else:
+            output_fs = _s3fs.S3FileSystem(anon=False)
+
+    # List all files in directory
+    if output_fs:
+        bucket_path = output_path.replace("s3://", "").rstrip("/")
+        try:
+            all_files = [f"s3://{f}" for f in output_fs.ls(bucket_path)]
+        except Exception:
+            all_files = []
+    else:
+        all_files = sorted(glob.glob(os.path.join(out_dir, "*")))
+
+    tag = f"-EBD_{frequency}"
+    tifs = [f for f in all_files if f.endswith(".tif") and tag in f]
+    vrts = [f for f in all_files if f.endswith(".vrt") and tag in f]
+
+    # Classify TIFs and VRTs into backscatter vs ancillary
+    anc_suffixes = tuple(f"_{s}.tif" for s in _KNOWN_ANC_SUFFIXES)
+    anc_vrt_suffixes = tuple(f"_{s}.vrt" for s in _KNOWN_ANC_SUFFIXES)
+
+    summary = {"backscatter": {"single_dates": [], "mosaics": [], "ts_by_track": [], "combined_ts": []},
+               "ancillary":   {"single_dates": [], "mosaics": [], "ts_by_track": [], "combined_ts": []}}
+
+    for f in tifs:
+        if any(f.endswith(s) for s in anc_suffixes):
+            summary["ancillary"]["single_dates"].append(f)
+        else:
+            summary["backscatter"]["single_dates"].append(f)
+
+    for f in vrts:
+        bn = os.path.basename(f)
+        is_anc = any(f.endswith(s) for s in anc_vrt_suffixes)
+        cat = "ancillary" if is_anc else "backscatter"
+        # Classify by name pattern
+        if "-" in bn.split("_")[4] if len(bn.split("_")) > 4 else False:
+            # Cycle range (e.g. 003-009) suggests time-series
+            summary[cat]["ts_by_track"].append(f)
+        else:
+            summary[cat]["single_dates"].append(f)
+
+    _print_vrt_summary(output_path, summary, vsis3=vsis3)
+
+
 def _green(text):
     """Wrap text in green ANSI escape if stdout is a terminal."""
     if hasattr(sys.stdout, "isatty") and sys.stdout.isatty():
@@ -892,13 +951,11 @@ def processing(args):
     output_profile = args.output_profile if args.output_profile else args.profile
     output_auth = get_auth_dict(output_profile, use_earthdata=False)  # Output unlikely to be Earthdata
 
-    # 2a. Logic: Show VRTs Only (Immediate Exit)
+    # 2a. Logic: Show Output Summary Only (Immediate Exit, read-only)
     if args.show_vrts:
-        build_track_vrts(
+        show_output_summary(
             output_path=args.output,
             frequency=args.freq,
-            mode_str=None,  # auto-detect from existing TIFs
-            verbose=False,
             output_auth=output_auth,
             vsis3=args.vsis3,
         )
