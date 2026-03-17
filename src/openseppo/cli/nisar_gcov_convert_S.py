@@ -82,7 +82,7 @@ def myargsparse(a):
     parser.add_argument("-o", "--output", type=str, required=False, help="Output directory path (S3 or local). Must end in '/' for batch processing.")
 
     # Defaults set to None to allow auto-detection in nisar_tools
-    parser.add_argument("-vars", "--vars", nargs="+", default=None, help="Grid Variables to extract, e.g. HHHH HVHV. If omitted, ALL variables for the frequency are used.")
+    parser.add_argument("-vars", "--vars", nargs="+", default=None, help="Grid Variables to extract, e.g. RHRH RVRV RHRV. If omitted, RHRH and RVRV are used by default.")
     parser.add_argument("-f", "--freq", type=str, default="A", help="Frequency (A/B). If omitted, defaults to A", choices=["A", "B"])
 
     # List Grids Flag
