@@ -12,14 +12,14 @@ https://github.com/EarthBigData/openSEPPO
 Compute pairwise interferometric coherence from co-registered NISAR GSLC
 complex SLC files produced by seppo_nisar_gslc_convert -cslc.
 
-  γ = |⟨z1·conj(z2)⟩| / sqrt(⟨|z1|²⟩·⟨|z2|²⟩)
+  gamma = |<z1*conj(z2)>| / sqrt(<|z1|^2> * <|z2|^2>)
 
-Spatial averaging uses a uniform boxcar window (default 5×5 pixels).
-Outputs are float32 COGs or GeoTIFFs in [0, 1], nodata = NaN.
+Spatial averaging uses a uniform boxcar window (default 5x5 pixels).
+Outputs are uint8 DN (DN=round(coh*100), nodata=255) or float32 COGs/GeoTIFFs.
 
 Inputs must be on the same spatial grid (same track, frame, frequency band).
 NISAR GSLC products from the same track/frame are already co-registered and
-geocoded to a common grid — no additional registration is needed.
+geocoded to a common grid -- no additional registration is needed.
 
 Usage examples:
 
@@ -29,7 +29,7 @@ Usage examples:
 2. All pairs from a multi-band CSLC time-series VRT:
     seppo_nisar_coherence -i ts_HH_cslc.vrt -o out/ -pairs all
 
-3. Custom window (3 rows × 9 cols, typical for GSLC at 20 m):
+3. Custom window (3 rows x 9 cols, typical for GSLC at 20 m):
     seppo_nisar_coherence -i a.tif b.tif -o out/ -window 3 9
 
 4. Plain GeoTIFF output to S3:
@@ -185,7 +185,7 @@ def processing(args):
     dtype_label = "float32" if args.no_dn else "uint8-DN"
     print(
         f"NISAR Coherence  |  inputs={n_inputs}  |  "
-        f"window={win_r}×{win_c}  |  pairs={args.pairs}  |  "
+        f"window={win_r}x{win_c}  |  pairs={args.pairs}  |  "
         f"format={args.output_format}  |  dtype={dtype_label}"
     )
 
@@ -216,7 +216,7 @@ def processing(args):
     if fail:
         print(f"\nFailed ({len(fail)}):")
         for r in fail:
-            print(f"  {r['label1']} × {r['label2']}: {r['error']}")
+            print(f"  {r['label1']} x {r['label2']}: {r['error']}")
 
     if fail:
         sys.exit(1)

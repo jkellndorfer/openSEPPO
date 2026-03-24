@@ -15,7 +15,7 @@ GeoTIFF (COG) or GTiff.  Output modes:
   * Power intensity  (|z|^2, float32)                     -- default (-pwr)
   * Scaled amplitude (uint16, GCOV-compatible)                        (-amp)
   * Raw magnitude    (|z|, float32)                                   (-mag)
-  * Wrapped phase    (angle(z), float32, radians, range −π … π)      (-phase)
+  * Wrapped phase    (angle(z), float32, radians, range -pi ... pi)   (-phase)
   * Complex SLC      (complex64, tiled GTiff, no overviews)           (-cslc)
 
 Spatial subsetting (srcwin / projwin), reprojection, downscaling, interior hole
@@ -158,7 +158,7 @@ def myargsparse(a):
     )
     mode_group.add_argument(
         "-phase", "--phase", action="store_const", dest="mode", const="phase",
-        help="Output wrapped phase angle(z) in radians (float32, range −π … π).  "
+        help="Output wrapped phase angle(z) in radians (float32, range -pi ... pi).  "
              "Reprojection uses nearest-neighbour automatically.",
     )
     mode_group.add_argument(

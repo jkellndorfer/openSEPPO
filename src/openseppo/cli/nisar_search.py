@@ -469,7 +469,7 @@ def _build_cmr_spatial(args):
     if args.point:
         lon, lat = args.point
         if args.buffer:
-            # buffer in degrees; 1 deg ≈ 111 320 m
+            # buffer in degrees; 1 deg ~ 111 320 m
             return {"circle": (lon, lat, args.buffer * 111320)}
         return {"point": (lon, lat)}
     if args.bbox:
@@ -1037,7 +1037,7 @@ def myargsparse(a):
     geom_src.add_argument("--bbox", nargs=4, type=float, metavar=("MIN_LON", "MIN_LAT", "MAX_LON", "MAX_LAT"), help="Bounding box in (xmin ymin xmax ymax) order")
     geom_src.add_argument("--point", nargs=2, type=float, metavar=("LON", "LAT"), help="Point in WGS84 lon/lat.  Use --buffer for radius search.")
     geom_src.add_argument("--geojson", metavar="FILE", help="GeoJSON file.  First feature used unless --union_geojson.")
-    sf.add_argument("--buffer", type=float, metavar="DEG", help="Buffer radius in degrees for --point (converted to metres: 1 deg ≈ 111 km)")
+    sf.add_argument("--buffer", type=float, metavar="DEG", help="Buffer radius in degrees for --point (converted to metres: 1 deg ~ 111 km)")
     sf.add_argument("--union_geojson", action="store_true", default=False, help="Union all GeoJSON features into a single geometry")
 
     # -- Output ----------------------------------------------------------------

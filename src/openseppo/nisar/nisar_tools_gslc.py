@@ -337,7 +337,7 @@ def get_acquisition_metadata_from_datatree_gslc(dt):
 
 
 def complex_to_power(z):
-    """Power intensity: |z|^2 as float32.  Zero (GSLC nodata) and non-finite → NaN."""
+    """Power intensity: |z|^2 as float32.  Zero (GSLC nodata) and non-finite -> NaN."""
     nodata_mask = (z.real == 0) & (z.imag == 0)
     mag = np.abs(z.astype(np.complex64)).astype(np.float32)
     out = mag * mag
@@ -347,7 +347,7 @@ def complex_to_power(z):
 
 
 def complex_to_magnitude(z):
-    """Raw magnitude: |z| as float32.  Zero (GSLC nodata) and non-finite → NaN."""
+    """Raw magnitude: |z| as float32.  Zero (GSLC nodata) and non-finite ->NaN."""
     nodata_mask = (z.real == 0) & (z.imag == 0)
     out = np.abs(z.astype(np.complex64)).astype(np.float32)
     out[nodata_mask] = np.nan
@@ -358,7 +358,7 @@ def complex_to_magnitude(z):
 def complex_to_amp_uint16(z):
     """Scaled amplitude: same formula as GCOV -amp (uint16, nodata=0).
 
-    Pipeline: complex → power (|z|²) → pwr_to_amp(power) → uint16.
+    Pipeline: complex -> power (|z|^2) -> pwr_to_amp(power) -> uint16.
     Matches the GCOV amplitude scaling exactly so GSLC and GCOV outputs
     are directly comparable.
     """
@@ -367,7 +367,7 @@ def complex_to_amp_uint16(z):
 
 
 def complex_to_phase(z):
-    """Wrapped phase in radians (−π … π) as float32.  Zero-valued samples → NaN."""
+    """Wrapped phase in radians (-pi ... pi) as float32.  Zero-valued samples -> NaN."""
     # Pixels where both real and imag are 0 are nodata
     nodata_mask = (z.real == 0) & (z.imag == 0)
     out = np.angle(z.astype(np.complex64)).astype(np.float32)
@@ -417,18 +417,18 @@ def _read_gslc_bands(file_url, input_fs, grid_path, variable_names, row, h, col,
 def _write_h5_subset_complex(src_f, grid_path, variable_names, col, row, w, h):
     """
     Return bytes of an HDF5 subset written with h5py, preserving complex64
-    dtype and all attributes — including complex-valued _FillValue — exactly
+    dtype and all attributes --including complex-valued _FillValue --exactly
     as they appear in the source file.
 
     Unlike the netCDF4-based _write_h5_subset, h5py copies compound/complex
     dtypes and scalar attributes without silently demoting them to real arrays.
 
     The output contains:
-      • Root-level attributes from the source
-      • Full group hierarchy down to the frequency grid, with group attributes
-      • xCoordinates / yCoordinates sliced to [col:col+w] / [row:row+h]
-      • projection dataset
-      • Each requested variable sliced to [row:row+h, col:col+w]
+      * Root-level attributes from the source
+      * Full group hierarchy down to the frequency grid, with group attributes
+      * xCoordinates / yCoordinates sliced to [col:col+w] / [row:row+h]
+      * projection dataset
+      * Each requested variable sliced to [row:row+h, col:col+w]
     """
     fd, tmp_path = tempfile.mkstemp(suffix=".h5")
     os.close(fd)
@@ -877,7 +877,7 @@ def _process_single_file_gslc(
         files_map = {}
         _driver      = "GTiff" if output_format.upper() == "GTIFF" else "COG"
         _gtiff_extra = {"bigtiff": "YES"} if _driver == "GTiff" else {}
-        # AMP (uint16) → predictor 2 (integer); pwr/mag/phase (float32) → predictor 3
+        # AMP (uint16) ->predictor 2 (integer); pwr/mag/phase (float32) ->predictor 3
         _predictor = 2 if _amp_mode else 3
         _write_extra = {"num_threads": _n_th, "predictor": _predictor}
         if _driver == "COG":
@@ -977,7 +977,7 @@ def _process_single_file_gslc(
             elif downscale_factor and downscale_factor > 1 and _phase_mode:
                 band_data = band_data[::downscale_factor, ::downscale_factor]
 
-            # --- Convert complex → target dtype (when no downscale was applied) ---
+            # --- Convert complex ->target dtype (when no downscale was applied) ---
             if isinstance(band_data, np.ndarray) and np.iscomplexobj(band_data):
                 if logic_mode == "pwr":
                     band_data = complex_to_power(band_data)

@@ -11,10 +11,10 @@ https://github.com/EarthBigData/openSEPPO
 Compute interferometric coherence magnitude between co-registered NISAR GSLC
 complex SLC acquisitions.
 
-  γ = |⟨z1·conj(z2)⟩| / sqrt(⟨|z1|²⟩·⟨|z2|²⟩)
+  gamma = |<z1*conj(z2)>| / sqrt(<|z1|^2> * <|z2|^2>)
 
 Spatial averaging uses a uniform (boxcar) filter.  Inputs must be on the same
-grid (same CRS, transform, and shape) — NISAR GSLC products from the same
+grid (same CRS, transform, and shape) -- NISAR GSLC products from the same
 track/frame/frequency satisfy this automatically.
 
 Input formats
@@ -33,7 +33,7 @@ coherence output is set to NaN.  Pixels where the denominator averages to zero
 Memory note
 -----------
 The coherence computation loads both input arrays into memory simultaneously.
-For a 20 m NISAR GSLC full frame (~14 000 × 9 000 pixels, complex64) that is
+For a 20 m NISAR GSLC full frame (~14 000 x 9 000 pixels, complex64) that is
 ~2 GB.  Use srcwin/projwin subsets from seppo_nisar_gslc_convert for large
 scenes, or process polarisations one at a time.
 """
@@ -55,9 +55,9 @@ def compute_coherence(z1, z2, window_rows=5, window_cols=5):
     """
     Estimate interferometric coherence between two co-registered complex SLC arrays.
 
-    γ = |⟨z1·conj(z2)⟩| / sqrt(⟨|z1|²⟩·⟨|z2|²⟩)
+    gamma = |<z1*conj(z2)>| / sqrt(<|z1|^2> * <|z2|^2>)
 
-    Spatial averaging uses a uniform (boxcar) filter of ``window_rows × window_cols``
+    Spatial averaging uses a uniform (boxcar) filter of ``window_rows x window_cols``
     pixels (scipy.ndimage.uniform_filter, mode='reflect').
 
     Parameters
@@ -66,7 +66,7 @@ def compute_coherence(z1, z2, window_rows=5, window_cols=5):
         Co-registered complex SLC arrays on the same spatial grid.
         Nodata convention: pixels where real == 0 AND imag == 0 are invalid.
     window_rows, window_cols : int
-        Window dimensions.  Typical choices: 5×5 (square), 3×9, 7×3.
+        Window dimensions.  Typical choices: 5x5 (square), 3x9, 7x3.
 
     Returns
     -------
@@ -88,12 +88,12 @@ def compute_coherence(z1, z2, window_rows=5, window_cols=5):
     ifg = z1 * np.conj(z2)   # complex interferogram
     win = (window_rows, window_cols)
 
-    # |⟨ifg⟩|: filter real and imaginary parts independently then recombine
+    # |<ifg>|: filter real and imaginary parts independently then recombine
     avg_r = uniform_filter(ifg.real.astype(np.float64), size=win)
     avg_i = uniform_filter(ifg.imag.astype(np.float64), size=win)
     num = np.sqrt(avg_r * avg_r + avg_i * avg_i)
 
-    # sqrt(⟨|z1|²⟩ · ⟨|z2|²⟩)
+    # sqrt(<|z1|^2> * <|z2|^2>)
     p1 = uniform_filter((z1.real ** 2 + z1.imag ** 2).astype(np.float64), size=win)
     p2 = uniform_filter((z2.real ** 2 + z2.imag ** 2).astype(np.float64), size=win)
     den = np.sqrt(p1 * p2)
@@ -116,7 +116,7 @@ def _write_coh_file(coh, out_path, transform, crs, output_format,
                     float32=False):
     """Write a coherence array as a COG or tiled GeoTIFF.
 
-    Default (float32=False): uint8 DN mode — DN = round(coh * 100), nodata=255.
+    Default (float32=False): uint8 DN mode -- DN = round(coh * 100), nodata=255.
     float32=True: float32 values in [0, 1], nodata=NaN.
     """
     h, w = coh.shape
@@ -240,7 +240,7 @@ def _build_coh_filename(meta1, meta2, label1, label2, pol, win_r, win_c):
 
     When both acquisitions carry full NISAR metadata the filename follows the
     NISAR product convention with product type changed to COH and the two
-    acquisition start-times encoded in positions 12–13:
+    acquisition start-times encoded in positions 12-13:
 
       NISAR_{il}_{pt}_COH_{cycle_ref}-{cycle_sec}_{track:03d}_{direction}_
       {frame:03d}_{mode}_{polarization}_{obs_mode}_{start_ref}_{start_sec}_
@@ -362,11 +362,11 @@ def _build_coh_filename_from_vrt(vrt_meta, label1, label2, win_r, win_c):
 
     Keeps all NISAR fields from the VRT name, replaces the combined date range
     with the specific pair dates, infers per-pair cycle numbers from the dates
-    using the 12-day NISAR repeat period, and replaces the ``-EBD_…_cslc.vrt``
-    suffix with ``-EBD_…_COH_win{R}x{C}.tif``.
+    using the 12-day NISAR repeat period, and replaces the ``-EBD_..._cslc.vrt``
+    suffix with ``-EBD_..._COH.tif``.
 
     Example output for pair (2025-11-18, 2025-11-30) from a VRT named
-    ``…_005-006_…_20251118T003554_20251130T003629-EBD_A_hv_cslc.vrt``::
+    ``..._005-006_..._20251118T003554_20251130T003629-EBD_A_hv_cslc.vrt``::
 
       NISAR_L2_PR_COH_005-006_113_A_013_4005_DHDH_A_20251118T000000_
       20251130T000000_R01234_N-EBD_A_hv_COH_win5x5.tif
@@ -448,7 +448,7 @@ def process_coherence_pairs(
     output_dir : str
         Output directory (local path or s3:// URI).
     window_rows, window_cols : int
-        Coherence estimation window size in pixels.  Default: 5×5.
+        Coherence estimation window size in pixels.  Default: 5x5.
     pairs : str
         ``"sequential"`` -- pair acquisitions[i] with acquisitions[i+1]  (default).
         ``"all"``        -- all unique pairs i < j.
@@ -460,7 +460,7 @@ def process_coherence_pairs(
     input_auth, output_auth : dict | None
         Auth dicts with optional keys ``profile``, ``key``/``secret``/``token``.
     num_threads : int | None
-        GDAL compression threads.  None → all available CPUs.
+        GDAL compression threads.  None -> all available CPUs.
     verbose : bool
 
     Returns
@@ -495,14 +495,14 @@ def process_coherence_pairs(
 
     with rasterio.Env(**_env_kw):
         if len(input_paths) == 1:
-            # Single multi-band file or VRT — each band is one acquisition
+            # Single multi-band file or VRT -- each band is one acquisition
             src_path = input_paths[0]
             vrt_meta = _parse_nisar_vrt_meta(src_path)
             with rasterio.open(src_path) as src:
                 n_bands = src.count
                 if n_bands < 2:
                     raise ValueError(
-                        f"Single-file mode requires ≥2 bands; "
+                        f"Single-file mode requires >=2 bands; "
                         f"{src_path!r} has only {n_bands} band(s).  "
                         f"Pass multiple files or a multi-band VRT."
                     )
@@ -533,7 +533,7 @@ def process_coherence_pairs(
 
     if verbose:
         print(f"  {n} acquisition(s), {len(pair_indices)} pair(s), "
-              f"window={window_rows}×{window_cols}, format={output_format}", flush=True)
+              f"window={window_rows}x{window_cols}, format={output_format}", flush=True)
 
     results = []
 
@@ -544,7 +544,7 @@ def process_coherence_pairs(
             pol = pol1 or pol2
 
             if verbose:
-                print(f"  [{pair_num}/{len(pair_indices)}]  {label1}  ×  {label2}",
+                print(f"  [{pair_num}/{len(pair_indices)}]  {label1}  x  {label2}",
                       flush=True)
 
             try:
@@ -572,7 +572,7 @@ def process_coherence_pairs(
 
                 if verbose:
                     mb = (z1.nbytes + z2.nbytes) / 1e6
-                    print(f"    Read {mb:.0f} MB ({z1.shape[1]}×{z1.shape[0]} px), "
+                    print(f"    Read {mb:.0f} MB ({z1.shape[1]}x{z1.shape[0]} px), "
                           f"computing coherence ...", flush=True)
 
                 coh = compute_coherence(

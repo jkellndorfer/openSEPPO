@@ -527,7 +527,7 @@ def _downscale_block(data_3d, factor, method="mean"):
         min_val = np.min(int_view, axis=(2, 4))
         result = np.where(max_val == 255, np.uint8(255),
                  np.where(min_val == 0, np.uint8(0), max_val))
-        return result.astype(np.float32)  # (1, new_h, new_w) — preserves input band dim
+        return result.astype(np.float32)  # (1, new_h, new_w) -- preserves input band dim
 
     with np.errstate(invalid="ignore"):
         if method == "sum":
@@ -1916,7 +1916,7 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
         # to reduce memory footprint (important for large files on smaller RAM).
         # dualpol_ratio requires both bands in memory simultaneously, so force normal mode.
         # When dualpol_ratio is active, strip ancillary vars to avoid holding
-        # them in the full stack — process ancillary in a separate run.
+        # them in the full stack -- process ancillary in a separate run.
         if dualpol_ratio:
             _dropped_anc = [v for v in variable_names if _is_ancillary(v)]
             if _dropped_anc:
