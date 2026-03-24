@@ -594,6 +594,10 @@ def get_gdal_dtype(numpy_dtype):
         return "UInt32"
     if "int32" in d:
         return "Int32"
+    if "complex64" in d or "cfloat32" in d:
+        return "CFloat32"
+    if "complex128" in d or "cfloat64" in d:
+        return "CFloat64"
     if "float32" in d:
         return "Float32"
     if "float64" in d:
