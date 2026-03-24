@@ -137,12 +137,6 @@ def myargsparse(a):
         help="AWS profile for writing output files (overrides --profile).",
     )
 
-    # --- Performance ---
-    parser.add_argument(
-        "--warp_threads", type=int, default=None, metavar="N",
-        help="GDAL compression threads.  Default: all available CPUs.",
-    )
-
     # --- Misc ---
     parser.add_argument(
         "-v", "--verbose", action="store_true",
@@ -205,7 +199,7 @@ def processing(args):
         float32=args.no_dn,
         input_auth=input_auth,
         output_auth=output_auth,
-        num_threads=args.warp_threads,
+        num_threads=None,
         verbose=args.verbose,
     )
 
