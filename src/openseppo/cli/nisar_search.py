@@ -923,6 +923,9 @@ def processing(args):
     output = "\n".join(lines) + ("\n" if lines else "")
 
     if args.output:
+        out_dir = os.path.dirname(args.output)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
         with open(args.output, "w") as fh:
             fh.write(output)
         if args.verbose:
