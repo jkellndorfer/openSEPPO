@@ -116,7 +116,7 @@ def _write_coh_file(coh, out_path, transform, crs, output_format,
                     float32=False):
     """Write a coherence array as a COG or tiled GeoTIFF.
 
-    Default (float32=False): uint8 DN mode -- DN = round(coh * 100), nodata=255.
+    Default (float32=False): uint8 DN mode -- DN = round(coh * 200), nodata=255.
     float32=True: float32 values in [0, 1], nodata=NaN.
     """
     h, w = coh.shape
@@ -130,7 +130,7 @@ def _write_coh_file(coh, out_path, transform, crs, output_format,
         predictor  = 3
     else:
         arr = np.where(np.isfinite(coh),
-                       np.clip(np.round(coh * 100), 0, 254).astype(np.uint8),
+                       np.clip(np.round(coh * 200), 0, 200).astype(np.uint8),
                        np.uint8(255))
         out_dtype  = "uint8"
         out_nodata = 255
@@ -456,7 +456,7 @@ def process_coherence_pairs(
         ``"COG"`` (default) or ``"GTiff"``.
     float32 : bool
         If True, write float32 values in [0, 1] with nodata=NaN.
-        Default False: write uint8 DN (DN = round(coh * 100), nodata=255).
+        Default False: write uint8 DN (DN = round(coh * 200), nodata=255).
     input_auth, output_auth : dict | None
         Auth dicts with optional keys ``profile``, ``key``/``secret``/``token``.
     num_threads : int | None
@@ -602,7 +602,7 @@ def process_coherence_pairs(
                     "WINDOW":     f"{window_rows}x{window_cols}",
                     "PAIRS_MODE": pairs,
                     "DTYPE":      "float32" if float32 else "uint8_DN",
-                    "DN_SCALE":   "N/A" if float32 else "coh = DN / 100  (nodata=255)",
+                    "DN_SCALE":   "N/A" if float32 else "coh = DN / 200  (nodata=255)",
                 }
                 if pol:
                     tif_meta["POLARIZATION"] = pol
@@ -762,6 +762,8 @@ def build_coherence_vrt(results, output_dir, window_rows, window_cols,
     vrt_dtype  = get_gdal_dtype(dtype)
     nodata_val = _format_nodata_val(nodata, dtype)
 
+    dn_scale_val = "N/A" if float32 else "coh = DN / 200  (nodata=255)"
+
     lines = [
         f'<VRTDataset rasterXSize="{width}" rasterYSize="{height}">',
         f'  <SRS dataAxisToSRSAxisMapping="1,2">{crs_wkt}</SRS>',
@@ -777,6 +779,7 @@ def build_coherence_vrt(results, output_dir, window_rows, window_cols,
             f'    <Metadata>\n'
             f'      <MDI key="Date">{r["label1"]}</MDI>\n'
             f'      <MDI key="Date2">{r["label2"]}</MDI>\n'
+            f'      <MDI key="DN_SCALE">{dn_scale_val}</MDI>\n'
             f'    </Metadata>\n'
             f'    <SimpleSource>\n'
             f'      <SourceFilename relativeToVRT="1">{rel_path}</SourceFilename>\n'

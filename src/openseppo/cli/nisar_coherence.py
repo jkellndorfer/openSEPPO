@@ -15,7 +15,7 @@ complex SLC files produced by seppo_nisar_gslc_convert -cslc.
   gamma = |<z1*conj(z2)>| / sqrt(<|z1|^2> * <|z2|^2>)
 
 Spatial averaging uses a uniform boxcar window (default 5x5 pixels).
-Outputs are uint8 DN (DN=round(coh*100), nodata=255) or float32 COGs/GeoTIFFs.
+Outputs are uint8 DN (DN=round(coh*200), nodata=255) or float32 COGs/GeoTIFFs.
 
 Inputs must be on the same spatial grid (same track, frame, frequency band).
 NISAR GSLC products from the same track/frame are already co-registered and
@@ -120,7 +120,7 @@ def myargsparse(a):
     parser.add_argument(
         "-no_DN", "--no_DN_8bit", action="store_true", dest="no_dn",
         help="Write coherence as float32 in [0, 1] with nodata=NaN instead of "
-             "the default uint8 DN encoding (DN = round(coh * 100), nodata=255).",
+             "the default uint8 DN encoding (DN = round(coh * 200), nodata=255).",
     )
 
     # --- Auth ---
