@@ -602,7 +602,7 @@ def process_coherence_pairs(
                     "WINDOW":     f"{window_rows}x{window_cols}",
                     "PAIRS_MODE": pairs,
                     "DTYPE":      "float32" if float32 else "uint8_DN",
-                    "DN_SCALE":   "N/A" if float32 else "coh = DN / 200  (nodata=255)",
+                    "COHERENCE":  "pixel value" if float32 else "DN / 200",
                 }
                 if pol:
                     tif_meta["POLARIZATION"] = pol
@@ -762,7 +762,7 @@ def build_coherence_vrt(results, output_dir, window_rows, window_cols,
     vrt_dtype  = get_gdal_dtype(dtype)
     nodata_val = _format_nodata_val(nodata, dtype)
 
-    dn_scale_val = "N/A" if float32 else "coh = DN / 200  (nodata=255)"
+    dn_scale_val = "pixel value" if float32 else "DN / 200"
 
     lines = [
         f'<VRTDataset rasterXSize="{width}" rasterYSize="{height}">',
@@ -779,7 +779,7 @@ def build_coherence_vrt(results, output_dir, window_rows, window_cols,
             f'    <Metadata>\n'
             f'      <MDI key="Date">{r["label1"]}</MDI>\n'
             f'      <MDI key="Date2">{r["label2"]}</MDI>\n'
-            f'      <MDI key="DN_SCALE">{dn_scale_val}</MDI>\n'
+            f'      <MDI key="COHERENCE">{dn_scale_val}</MDI>\n'
             f'    </Metadata>\n'
             f'    <SimpleSource>\n'
             f'      <SourceFilename relativeToVRT="1">{rel_path}</SourceFilename>\n'

@@ -240,7 +240,8 @@ def processing(args):
             verbose=args.verbose,
         )
         if vrt_path:
-            print(f"\nVRT: {vrt_path}")
+            print(f"\nVRT:")
+            print(f"  {vrt_path}")
 
     if fail:
         sys.exit(1)
