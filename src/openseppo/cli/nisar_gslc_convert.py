@@ -214,7 +214,13 @@ def myargsparse(a):
     group.add_argument(
         "-projwin", "--projwin", nargs=4, type=float,
         metavar=("ULX", "ULY", "LRX", "LRY"),
-        help="Geographic subset window (map coordinates in native or target CRS).",
+        help="Geographic subset window.  Coordinates are in the native or target CRS "
+             "unless -projwin_srs is given.",
+    )
+    parser.add_argument(
+        "-projwin_srs", "--projwin_srs", type=str,
+        help="CRS of the -projwin coordinates (e.g. EPSG:4326).  If omitted, "
+             "-projwin is assumed to be in the native or target raster CRS.",
     )
 
     # --- Reprojection ---
@@ -1057,6 +1063,7 @@ def processing(args):
             output_path=args.output,
             srcwin=tuple(args.srcwin) if args.srcwin else None,
             projwin=tuple(args.projwin) if args.projwin else None,
+            projwin_srs=args.projwin_srs,
             transform_mode=args.mode,
             frequency=args.freq,
             single_bands=args.single_bands,

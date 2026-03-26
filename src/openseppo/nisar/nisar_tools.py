@@ -438,6 +438,62 @@ def get_indices_from_extent(x_coords, y_coords, projwin):
     return col, row, w, h
 
 
+def reproject_projwin(projwin, src_srs, dst_srs, step=None, buffer_frac=0.002):
+    """
+    Convert a projwin bounding box from *src_srs* to *dst_srs*.
+
+    Densifies each edge before reprojecting so curved projection boundaries
+    are captured correctly.  The number of sample points per edge adapts to
+    the edge length: one point every *step* map-units (in *src_srs*) with a
+    minimum of 21 points.  The result bbox is then expanded by *buffer_frac*
+    on each side to absorb floating-point edge effects.
+
+    Parameters
+    ----------
+    projwin : (ulx, uly, lrx, lry) in src_srs
+    src_srs, dst_srs : CRS string (EPSG:XXXX, WKT, or PROJ string)
+    step : float or None
+        Approx. sample spacing along each edge in src_srs units.
+        None → 1/100 of the shorter edge length (min 21 pts per edge).
+    buffer_frac : float
+        Fractional expansion of the output bbox on each side.  Default 0.002.
+
+    Returns
+    -------
+    (ulx, uly, lrx, lry) in dst_srs — guaranteed to cover the full input bbox.
+    """
+    from pyproj import Transformer
+
+    ulx, uly, lrx, lry = projwin
+    dx = abs(lrx - ulx)
+    dy = abs(uly - lry)
+
+    if step is None:
+        step = min(dx, dy) / 100.0 if min(dx, dy) > 0 else 1.0
+
+    def _pts(a, b):
+        n = max(21, int(abs(b - a) / step) + 2)
+        return np.linspace(a, b, n)
+
+    top_x   = _pts(ulx, lrx);  top_y   = np.full_like(top_x,   uly)
+    right_y = _pts(uly, lry);  right_x = np.full_like(right_y, lrx)
+    bot_x   = _pts(lrx, ulx);  bot_y   = np.full_like(bot_x,   lry)
+    left_y  = _pts(lry, uly);  left_x  = np.full_like(left_y,  ulx)
+
+    xs = np.concatenate([top_x, right_x, bot_x, left_x])
+    ys = np.concatenate([top_y, right_y, bot_y, left_y])
+
+    transformer = Transformer.from_crs(src_srs, dst_srs, always_xy=True)
+    dst_xs, dst_ys = transformer.transform(xs, ys)
+
+    out_ulx, out_uly = float(np.min(dst_xs)), float(np.max(dst_ys))
+    out_lrx, out_lry = float(np.max(dst_xs)), float(np.min(dst_ys))
+
+    buf_x = abs(out_lrx - out_ulx) * buffer_frac
+    buf_y = abs(out_uly - out_lry) * buffer_frac
+    return (out_ulx - buf_x, out_uly + buf_y, out_lrx + buf_x, out_lry - buf_y)
+
+
 def recommend_ec2_instance(width, height, num_bands=1, downscale_factor=1):
     raw_size_gb = (width * height * num_bands * 4) / (1024**3)
     peak_ram_gb = raw_size_gb * 3.5 + 1.0
@@ -1634,7 +1690,7 @@ def pwr_to_amp(pwr, scale_factor=10**8.3):
 # =========================================================
 
 
-def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, projwin, transform_mode, frequency, single_bands, vrt, downscale_factor, target_align_pixels, input_fs, output_fs, is_batch=False, cache=None, keep=False, use_earthdata=False, verbose=False, target_srs=None, target_res=None, resample="cubic", output_format="COG", fill_holes=False, num_threads=None, read_threads=8, dualpol_ratio=False, sigma0=False):
+def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, projwin, transform_mode, frequency, single_bands, vrt, downscale_factor, target_align_pixels, input_fs, output_fs, is_batch=False, cache=None, keep=False, use_earthdata=False, verbose=False, target_srs=None, target_res=None, resample="cubic", output_format="COG", fill_holes=False, num_threads=None, read_threads=8, dualpol_ratio=False, sigma0=False, projwin_srs=None):
 
     h5_basename = h5_url.split("/")[-1]
     base_name = h5_basename[:-3] if h5_basename.lower().endswith(".h5") else h5_basename
@@ -1746,6 +1802,15 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
         input_crs_obj = _parse_crs(info["crs"])
         dst_crs_obj = _parse_crs(target_srs) if target_srs else input_crs_obj
         crs_changes = (dst_crs_obj != input_crs_obj)
+
+        # Convert projwin from projwin_srs to the CRS expected by downstream code.
+        # With t_srs: convert to target_srs (existing calculate_source_window then expands to native).
+        # Without t_srs: convert directly to native CRS.
+        if projwin_srs and projwin:
+            _dst_srs = target_srs if crs_changes else info["crs"]
+            projwin = reproject_projwin(projwin, projwin_srs, _dst_srs)
+            if verbose:
+                print(f"    projwin_srs {projwin_srs} -> {_dst_srs}: {projwin}", flush=True)
 
         # --- AUTO PRE-DOWNSCALE from -tr (only when -d not explicitly set) ---
         # For same-CRS exact integer multiples: pure block averaging, no warp.
@@ -2604,7 +2669,7 @@ def _process_single_file(h5_url, variable_names, output_dir_or_file, srcwin, pro
 # =========================================================
 
 
-def process_chunk_task(h5_url, variable_names, output_path, srcwin=None, projwin=None, transform_mode="db", frequency="A", single_bands=False, vrt=False, downscale_factor=None, target_align_pixels=False, input_auth=None, output_auth=None, time_series_vrt=True, list_grids=False, cache=None, keep=False, verbose=False, target_srs=None, target_res=None, resample="cubic", output_format="COG", fill_holes=False, num_threads=None, read_threads=8, dualpol_ratio=False, sigma0=False):
+def process_chunk_task(h5_url, variable_names, output_path, srcwin=None, projwin=None, transform_mode="db", frequency="A", single_bands=False, vrt=False, downscale_factor=None, target_align_pixels=False, input_auth=None, output_auth=None, time_series_vrt=True, list_grids=False, cache=None, keep=False, verbose=False, target_srs=None, target_res=None, resample="cubic", output_format="COG", fill_holes=False, num_threads=None, read_threads=8, dualpol_ratio=False, sigma0=False, projwin_srs=None):
 
     use_earthdata = False
     if input_auth is None:
@@ -2731,7 +2796,7 @@ def process_chunk_task(h5_url, variable_names, output_path, srcwin=None, projwin
             output_fs = create_s3_fs(output_auth)
 
         for url in urls:
-            res = _process_single_file(url, variable_names, output_path, srcwin, projwin, transform_mode, frequency, single_bands, vrt, downscale_factor, target_align_pixels, input_fs, output_fs, is_batch=is_batch, cache=cache, keep=keep, use_earthdata=use_earthdata, verbose=verbose, target_srs=target_srs, target_res=target_res, resample=resample, output_format=output_format, fill_holes=fill_holes, num_threads=num_threads, read_threads=read_threads, dualpol_ratio=dualpol_ratio, sigma0=sigma0)
+            res = _process_single_file(url, variable_names, output_path, srcwin, projwin, transform_mode, frequency, single_bands, vrt, downscale_factor, target_align_pixels, input_fs, output_fs, is_batch=is_batch, cache=cache, keep=keep, use_earthdata=use_earthdata, verbose=verbose, target_srs=target_srs, target_res=target_res, resample=resample, output_format=output_format, fill_holes=fill_holes, num_threads=num_threads, read_threads=read_threads, dualpol_ratio=dualpol_ratio, sigma0=sigma0, projwin_srs=projwin_srs)
             results_meta.append(res)
 
         if is_batch and time_series_vrt and output_format.lower() != "h5":

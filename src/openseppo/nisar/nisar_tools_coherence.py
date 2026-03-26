@@ -538,6 +538,7 @@ def process_coherence_pairs(
     output_auth=None,
     num_threads=None,
     projwin=None,
+    projwin_srs=None,
     downscale=None,
     target_srs=None,
     target_res=None,
@@ -571,8 +572,14 @@ def process_coherence_pairs(
     num_threads : int | None
         GDAL compression threads.  None -> all available CPUs.
     projwin : (ulx, uly, lrx, lry) | None
-        Crop output to this bounding box (map coordinates in the input CRS).
-        Applied after coherence estimation.
+        Crop output to this bounding box.  Coordinates are in the input CRS
+        unless ``projwin_srs`` is given.  Applied after coherence estimation.
+    projwin_srs : str | None
+        CRS of the ``projwin`` coordinates (e.g. ``"EPSG:4326"``).  When given,
+        projwin is reprojected to the native CRS before cropping, with an
+        expansion step via the target CRS when ``target_srs`` is also set so
+        the native crop is large enough to produce the full projwin area after
+        reprojection.
     downscale : int or (factor_y, factor_x) | None
         Block-average downscale factor applied after crop and before reproject.
     target_srs : str | None
@@ -674,6 +681,24 @@ def process_coherence_pairs(
                     crs = src1.crs
                     src_tags = dict(src1.tags())
 
+                # Resolve projwin_srs: convert projwin to native CRS (or via t_srs).
+                # When t_srs is also given: route through t_srs first so the native
+                # crop is large enough to produce the full projwin area after warp.
+                _projwin = projwin
+                if projwin_srs and projwin is not None:
+                    from openseppo.nisar.nisar_tools import reproject_projwin
+                    _auth = crs.to_authority()
+                    _native_srs = (f"{_auth[0]}:{_auth[1]}" if _auth
+                                   else crs.to_wkt())
+                    if target_srs:
+                        _projwin_t = reproject_projwin(projwin, projwin_srs, target_srs)
+                        _projwin = reproject_projwin(_projwin_t, target_srs, _native_srs)
+                    else:
+                        _projwin = reproject_projwin(projwin, projwin_srs, _native_srs)
+                    if verbose:
+                        print(f"    projwin_srs {projwin_srs} -> native: {_projwin}",
+                              flush=True)
+
                 # Read second acquisition
                 with rasterio.open(path2) as src2:
                     z2 = src2.read(band2)
@@ -704,12 +729,12 @@ def process_coherence_pairs(
                 gc.collect()
 
                 # Post-processing: crop, downscale, reproject
-                _need_post = (projwin is not None or downscale is not None
+                _need_post = (_projwin is not None or downscale is not None
                               or target_srs is not None or target_res is not None)
                 if _need_post:
                     coh, transform, crs = _post_process_coh(
                         coh, transform, crs,
-                        projwin=projwin,
+                        projwin=_projwin,
                         downscale=downscale,
                         target_srs=target_srs,
                         target_res=target_res,

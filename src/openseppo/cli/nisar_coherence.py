@@ -135,8 +135,13 @@ def myargsparse(a):
     # --- Post-processing: crop / downscale / reproject ---
     parser.add_argument(
         "-projwin", "--projwin", nargs=4, type=float, metavar=("ULX", "ULY", "LRX", "LRY"),
-        help="Crop output to this bounding box (map coords in the input CRS, applied "
-             "after coherence estimation).  ulx uly lrx lry.",
+        help="Crop output to this bounding box (applied after coherence estimation).  "
+             "ulx uly lrx lry.  Coordinates are in the native CRS unless -projwin_srs is given.",
+    )
+    parser.add_argument(
+        "-projwin_srs", "--projwin_srs", type=str,
+        help="CRS of the -projwin coordinates (e.g. EPSG:4326).  If omitted, "
+             "-projwin is assumed to be in the native raster CRS.",
     )
     parser.add_argument(
         "-d", "--downscale", nargs="+", type=int, metavar="N",
@@ -272,6 +277,7 @@ def processing(args):
         output_auth=output_auth,
         num_threads=None,
         projwin=args.projwin,
+        projwin_srs=args.projwin_srs,
         downscale=args.downscale,
         target_srs=args.t_srs,
         target_res=args.tr,

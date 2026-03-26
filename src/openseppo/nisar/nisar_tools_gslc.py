@@ -509,7 +509,7 @@ def _process_single_file_gslc(
     is_batch=False, cache=None, keep=False, use_earthdata=False,
     verbose=False, target_srs=None, target_res=None, resample="cubic",
     output_format="COG", fill_holes=False, num_threads=None, read_threads=8,
-    square_pixels=False,
+    square_pixels=False, projwin_srs=None,
 ):
     """
     Convert one GSLC HDF5 file to COG/GTiff/H5/complex-GTiff.
@@ -595,6 +595,14 @@ def _process_single_file_gslc(
         input_crs_obj = _parse_crs(info["crs"])
         dst_crs_obj   = _parse_crs(target_srs) if target_srs else input_crs_obj
         crs_changes   = (dst_crs_obj != input_crs_obj)
+
+        # Convert projwin from projwin_srs to the CRS expected by downstream code.
+        if projwin_srs and projwin:
+            from openseppo.nisar.nisar_tools import reproject_projwin
+            _dst_srs = target_srs if crs_changes else info["crs"]
+            projwin = reproject_projwin(projwin, projwin_srs, _dst_srs)
+            if verbose:
+                print(f"    projwin_srs {projwin_srs} -> {_dst_srs}: {projwin}", flush=True)
 
         # Phase data must NOT be averaged by warp kernels; force nearest-neighbour
         _phase_mode = (logic_mode == "phase")
@@ -1152,7 +1160,7 @@ def process_chunk_task_gslc(
     time_series_vrt=True, list_grids=False, list_vars=False, cache=None, keep=False,
     verbose=False, target_srs=None, target_res=None, resample="cubic",
     output_format="COG", fill_holes=False, num_threads=None, read_threads=8,
-    square_pixels=False,
+    square_pixels=False, projwin_srs=None,
 ):
     """
     Batch entry point for GSLC conversion.
@@ -1295,6 +1303,7 @@ def process_chunk_task_gslc(
                 fill_holes=fill_holes, num_threads=num_threads,
                 read_threads=read_threads,
                 square_pixels=square_pixels,
+                projwin_srs=projwin_srs,
             )
             results_meta.append(res)
 
