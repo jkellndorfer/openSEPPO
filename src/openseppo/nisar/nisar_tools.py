@@ -505,18 +505,25 @@ def _ancillary_nodata(var):
 def _downscale_block(data_3d, factor, method="mean"):
     """Block-downscale a (1, H, W) array using the given aggregation.
 
+    *factor* may be an integer (isotropic) or a ``(factor_y, factor_x)`` tuple
+    for anisotropic downscaling.
+
     Methods:
         mean           -- nanmean  (power, gamma2sigma)
         sum            -- nansum   (numberOfLooks)
         mask_priority  -- NISAR mask: 255 (fill) > 0 (invalid) > subswath (valid)
     """
+    if isinstance(factor, (tuple, list)):
+        factor_y, factor_x = int(factor[0]), int(factor[1])
+    else:
+        factor_y = factor_x = int(factor)
     _, h, w = data_3d.shape
-    new_h = h - (h % factor)
-    new_w = w - (w % factor)
+    new_h = h - (h % factor_y)
+    new_w = w - (w % factor_x)
     if new_h == 0 or new_w == 0:
-        raise ValueError(f"Downscale factor {factor} larger than image ({w}x{h}).")
+        raise ValueError(f"Downscale factor ({factor_y},{factor_x}) larger than image ({w}x{h}).")
     cropped = data_3d[:, :new_h, :new_w]
-    reshaped = cropped.reshape(1, new_h // factor, factor, new_w // factor, factor)
+    reshaped = cropped.reshape(1, new_h // factor_y, factor_y, new_w // factor_x, factor_x)
 
     if method == "mask_priority":
         # Vectorised priority: 255 (fill) > 0 (invalid) > subswath value.
@@ -565,15 +572,26 @@ def _reproject_ancillary_band(data_2d, src_transform, src_crs, dst_transform,
 
 
 def perform_downscaling(data_stack, factor):
-    if factor is None or factor <= 1:
+    """Block-average downscale a (B, H, W) stack.
+
+    *factor* may be an integer (isotropic) or a ``(factor_y, factor_x)`` tuple
+    for anisotropic downscaling.
+    """
+    if factor is None:
+        return data_stack
+    if isinstance(factor, (tuple, list)):
+        factor_y, factor_x = int(factor[0]), int(factor[1])
+    else:
+        factor_y = factor_x = int(factor)
+    if factor_y <= 1 and factor_x <= 1:
         return data_stack
     b, h, w = data_stack.shape
-    new_h = h - (h % factor)
-    new_w = w - (w % factor)
+    new_h = h - (h % factor_y)
+    new_w = w - (w % factor_x)
     if new_h == 0 or new_w == 0:
-        raise ValueError(f"Downscale factor {factor} is larger than image size ({w}x{h}).")
+        raise ValueError(f"Downscale factor ({factor_y},{factor_x}) is larger than image size ({w}x{h}).")
     cropped = data_stack[:, :new_h, :new_w]
-    reshaped = cropped.reshape(b, new_h // factor, factor, new_w // factor, factor)
+    reshaped = cropped.reshape(b, new_h // factor_y, factor_y, new_w // factor_x, factor_x)
     with np.errstate(invalid="ignore"):
         downscaled = np.nanmean(reshaped, axis=(2, 4))
     return downscaled

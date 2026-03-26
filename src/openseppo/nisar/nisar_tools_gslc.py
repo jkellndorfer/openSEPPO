@@ -509,6 +509,7 @@ def _process_single_file_gslc(
     is_batch=False, cache=None, keep=False, use_earthdata=False,
     verbose=False, target_srs=None, target_res=None, resample="cubic",
     output_format="COG", fill_holes=False, num_threads=None, read_threads=8,
+    square_pixels=False,
 ):
     """
     Convert one GSLC HDF5 file to COG/GTiff/H5/complex-GTiff.
@@ -607,6 +608,20 @@ def _process_single_file_gslc(
                 _why = "phase" if _phase_mode else "cslc"
                 print(f"    Note: {_why} mode forces nearest-neighbour resampling.", flush=True)
 
+        # --- Auto square-pixel downscale ---
+        if square_pixels and downscale_factor is None:
+            _nat_x = abs(info["res_x"])
+            _nat_y = abs(info["res_y"])
+            if not math.isclose(_nat_x, _nat_y, rel_tol=1e-4):
+                _coarser = max(_nat_x, _nat_y)
+                _sq_x = max(1, round(_coarser / _nat_x))
+                _sq_y = max(1, round(_coarser / _nat_y))
+                downscale_factor = (_sq_x, _sq_y)
+                if verbose:
+                    print(f"    --square: native {_nat_x:.4g}x{_nat_y:.4g} m -> "
+                          f"downscale ({_sq_x},{_sq_y}) -> "
+                          f"{_nat_x*_sq_x:.4g}x{_nat_y*_sq_y:.4g} m", flush=True)
+
         # --- Auto pre-downscale from -tr ---
         if target_res is not None and downscale_factor is None:
             _tr_x = abs(target_res[0])
@@ -620,14 +635,17 @@ def _process_single_file_gslc(
                 _ratio_y = _tr_y / _nat_y
                 _ix = int(round(_ratio_x))
                 _iy = int(round(_ratio_y))
-                if (_ix == _iy and _ix > 1
+                if (_ix >= 1 and _iy >= 1
                         and math.isclose(_ratio_x, _ix, rel_tol=1e-4)
-                        and math.isclose(_ratio_y, _iy, rel_tol=1e-4)):
+                        and math.isclose(_ratio_y, _iy, rel_tol=1e-4)
+                        and (_ix > 1 or _iy > 1)):
                     if not _phase_mode and not _cslc_mode:
-                        downscale_factor = _ix
+                        downscale_factor = _ix if _ix == _iy else (_ix, _iy)
                         if verbose:
-                            print(f"    Auto pre-downscale: {_ix}x block average "
-                                  f"({_nat_x:.4g} -> {_tr_x:.4g})", flush=True)
+                            _lbl = f"{_ix}x" if _ix == _iy else f"({_ix},{_iy})"
+                            print(f"    Auto pre-downscale: {_lbl} block average "
+                                  f"({_nat_x:.4g}x{_nat_y:.4g} -> "
+                                  f"{_tr_x:.4g}x{_tr_y:.4g})", flush=True)
                     else:
                         if verbose:
                             _skip_why = "phase" if _phase_mode else "cslc"
@@ -644,12 +662,19 @@ def _process_single_file_gslc(
                                   f"({_nat_x:.4g} -> {_nat_x * _auto_d:.4g}, "
                                   f"then warp to {_tr_x:.4g})", flush=True)
 
+        # --- Normalise downscale_factor to (_df_x, _df_y) for all further use ---
+        if isinstance(downscale_factor, (tuple, list)):
+            _df_x, _df_y = int(downscale_factor[0]), int(downscale_factor[1])
+        elif downscale_factor and downscale_factor > 1:
+            _df_x = _df_y = int(downscale_factor)
+        else:
+            _df_x = _df_y = 1
+
         # Determine whether a warp is needed due to an explicit target resolution
         needs_resample = False
         if target_res is not None and not crs_changes:
-            df = downscale_factor if (downscale_factor and downscale_factor > 1) else 1
-            eff_res_x = abs(info["res_x"]) * df
-            eff_res_y = abs(info["res_y"]) * df
+            eff_res_x = abs(info["res_x"]) * _df_x
+            eff_res_y = abs(info["res_y"]) * _df_y
             already_matches = (
                 math.isclose(eff_res_x, abs(target_res[0]), rel_tol=1e-6)
                 and math.isclose(eff_res_y, abs(target_res[1]), rel_tol=1e-6)
@@ -698,14 +723,14 @@ def _process_single_file_gslc(
                 print(f"    Full extent (pixels): w={w}, h={h}", flush=True)
 
         # Align pixel grid for downscaling
-        if target_align_pixels and downscale_factor and downscale_factor > 1:
+        if target_align_pixels and (_df_x > 1 or _df_y > 1):
             curr_x_center = info["x"][col]
             curr_y_center = info["y"][row]
             dx, dy = info["res_x"], info["res_y"]
             curr_ulx = curr_x_center - abs(dx) / 2.0
             curr_uly = curr_y_center + abs(dy) / 2.0
-            target_span_x = abs(dx) * downscale_factor
-            target_span_y = abs(dy) * downscale_factor
+            target_span_x = abs(dx) * _df_x
+            target_span_y = abs(dy) * _df_y
             aligned_ulx = np.floor(curr_ulx / target_span_x) * target_span_x
             aligned_uly = np.ceil(curr_uly / target_span_y) * target_span_y
             diff_x = curr_ulx - aligned_ulx
@@ -715,11 +740,11 @@ def _process_single_file_gslc(
             new_col = col - shift_x
             new_row = row - shift_y
             if new_col < 0:
-                offset_blocks = int(np.ceil(abs(new_col) / downscale_factor))
-                new_col += offset_blocks * downscale_factor
+                offset_blocks = int(np.ceil(abs(new_col) / _df_x))
+                new_col += offset_blocks * _df_x
             if new_row < 0:
-                offset_blocks = int(np.ceil(abs(new_row) / downscale_factor))
-                new_row += offset_blocks * downscale_factor
+                offset_blocks = int(np.ceil(abs(new_row) / _df_y))
+                new_row += offset_blocks * _df_y
             if verbose:
                 print(f"    Aligning Pixels: ({col},{row}) -> ({new_col},{new_row})", flush=True)
             col, row = new_col, new_row
@@ -792,12 +817,8 @@ def _process_single_file_gslc(
         ulx = x_center - abs(orig_res_x) / 2.0
         uly = y_center + abs(orig_res_y) / 2.0
 
-        if downscale_factor and downscale_factor > 1:
-            out_res_x = orig_res_x * downscale_factor
-            out_res_y = orig_res_y * downscale_factor
-        else:
-            out_res_x = orig_res_x
-            out_res_y = orig_res_y
+        out_res_x = orig_res_x * _df_x
+        out_res_y = orig_res_y * _df_y
 
         transform_obj = from_origin(ulx, uly, out_res_x, abs(out_res_y))
         crs_str = info["crs"]
@@ -805,9 +826,8 @@ def _process_single_file_gslc(
         # --- Warp parameters (computed once) ---
         _n_th = str(num_threads) if num_threads is not None else "ALL_CPUS"
         if needs_reproject:
-            df      = downscale_factor if (downscale_factor and downscale_factor > 1) else 1
-            w_eff   = (w - w % df) // df
-            h_eff   = (h - h % df) // df
+            w_eff   = (w - w % _df_x) // _df_x
+            h_eff   = (h - h % _df_y) // _df_y
             _dt, _dw, _dh = calculate_default_transform(
                 input_crs_obj, dst_crs_obj, w_eff, h_eff,
                 left=ulx, bottom=uly - h_eff * abs(out_res_y),
@@ -894,8 +914,8 @@ def _process_single_file_gslc(
             if _cslc_mode:
                 _cslc_data = band_data.astype(np.complex64)
                 # Nearest decimation only (block-averaging complex is invalid)
-                if downscale_factor and downscale_factor > 1:
-                    _cslc_data = _cslc_data[::downscale_factor, ::downscale_factor]
+                if _df_x > 1 or _df_y > 1:
+                    _cslc_data = _cslc_data[::_df_y, ::_df_x]
 
                 _c_transform = out_transform
                 _c_crs = out_crs
@@ -959,11 +979,11 @@ def _process_single_file_gslc(
             # Phase: nearest-neighbour decimation (no averaging on cyclic data).
             # AMP (uint16): convert to power first, downscale power, then scale.
             # pwr / mag: convert to real, downscale, keep as float32.
-            if downscale_factor and downscale_factor > 1 and not _phase_mode:
+            if (_df_x > 1 or _df_y > 1) and not _phase_mode:
                 # Convert to power for downscaling (correct radiometric average)
                 real_data = complex_to_power(band_data)
                 real_data = real_data[np.newaxis, :, :]
-                real_data = perform_downscaling(real_data, downscale_factor)[0]
+                real_data = perform_downscaling(real_data, (_df_y, _df_x))[0]
                 # real_data is now downscaled power (float32)
                 if logic_mode == "pwr":
                     band_data = real_data
@@ -974,8 +994,8 @@ def _process_single_file_gslc(
                                                   real_data, np.nan)).astype(np.float32)
                 else:
                     band_data = real_data
-            elif downscale_factor and downscale_factor > 1 and _phase_mode:
-                band_data = band_data[::downscale_factor, ::downscale_factor]
+            elif (_df_x > 1 or _df_y > 1) and _phase_mode:
+                band_data = band_data[::_df_y, ::_df_x]
 
             # --- Convert complex ->target dtype (when no downscale was applied) ---
             if isinstance(band_data, np.ndarray) and np.iscomplexobj(band_data):
@@ -1132,6 +1152,7 @@ def process_chunk_task_gslc(
     time_series_vrt=True, list_grids=False, list_vars=False, cache=None, keep=False,
     verbose=False, target_srs=None, target_res=None, resample="cubic",
     output_format="COG", fill_holes=False, num_threads=None, read_threads=8,
+    square_pixels=False,
 ):
     """
     Batch entry point for GSLC conversion.
@@ -1273,6 +1294,7 @@ def process_chunk_task_gslc(
                 resample=resample, output_format=output_format,
                 fill_holes=fill_holes, num_threads=num_threads,
                 read_threads=read_threads,
+                square_pixels=square_pixels,
             )
             results_meta.append(res)
 

@@ -178,8 +178,16 @@ def myargsparse(a):
 
     # --- Downscaling ---
     parser.add_argument(
-        "-d", "--downscale", type=int, default=None,
-        help="Downscale factor (integer block average for pwr/amp; nearest for phase).",
+        "-d", "--downscale", type=int, nargs="+", default=None,
+        metavar="N",
+        help="Downscale factor: one integer for isotropic (e.g. -d 2) or two integers "
+             "for anisotropic X Y (e.g. -d 2 4).  Block average for pwr/amp/mag; "
+             "nearest decimation for phase/cslc.",
+    )
+    parser.add_argument(
+        "--square", action="store_true",
+        help="Auto-downscale to square pixels by averaging to the coarser native spacing. "
+             "Ignored if -d is also supplied.",
     )
 
     # --- VRT & output structure ---
@@ -289,6 +297,15 @@ def myargsparse(a):
 
     args = seppo_parse_args(parser, a)
     args.use_earthdata = False  # auto-detected later
+
+    # Normalise -d to a single int or (x, y) tuple stored in args.downscale
+    if args.downscale is not None:
+        if len(args.downscale) == 1:
+            args.downscale = args.downscale[0]
+        elif len(args.downscale) == 2:
+            args.downscale = tuple(args.downscale)
+        else:
+            parser.error("-d/--downscale accepts 1 integer (isotropic) or 2 integers (X Y).")
 
     if args.verbose:
         pprint(vars(args))
@@ -1028,7 +1045,10 @@ def processing(args):
     input_auth    = get_auth_dict(input_profile, args.use_earthdata)
 
     print(f"Starting GSLC Batch Processing: {len(urls)} files.")
-    print(f"Mode: {args.mode} | Freq: {args.freq} | Downscale: {args.downscale}")
+    _ds_label = (f"{args.downscale[0]}x{args.downscale[1]}"
+                 if isinstance(args.downscale, tuple) else str(args.downscale))
+    _sq_label = " (--square)" if args.square and args.downscale is None else ""
+    print(f"Mode: {args.mode} | Freq: {args.freq} | Downscale: {_ds_label}{_sq_label}")
 
     try:
         result = nisar_tools_gslc.process_chunk_task_gslc(
@@ -1058,6 +1078,7 @@ def processing(args):
             fill_holes=args.fill_holes,
             num_threads=args.warp_threads,
             read_threads=args.read_threads,
+            square_pixels=args.square,
         )
         print("\n" + str(result))
 
