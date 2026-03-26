@@ -649,3 +649,155 @@ def process_coherence_pairs(
 
     ok = sum(1 for r in results if r["success"])
     return results, f"Done: {ok}/{len(results)} coherence map(s) written to {out_dir}/"
+
+
+# ---------------------------------------------------------------------------
+# VRT stacking
+# ---------------------------------------------------------------------------
+
+
+def _coh_vrt_filename(first_path, label_start, label_end, win_r, win_c):
+    """
+    Derive a VRT filename for the coherence time-series stack.
+
+    If *first_path* follows the NISAR COH naming convention the VRT name
+    mirrors it with the pair-specific timestamps replaced by the overall
+    date range and the suffix changed to ``_ts_coh.vrt``.  Otherwise a
+    short generic name is returned.
+    """
+    basename = os.path.basename(first_path)
+    compact_start = label_start.replace("-", "")
+    compact_end   = label_end.replace("-", "")
+
+    if "-EBD_" in basename and basename.startswith("NISAR_"):
+        nisar_base, ebd_raw = basename.split("-EBD_", 1)
+        ebd_stem = re.sub(r"_COH\.tif$", "", ebd_raw, flags=re.IGNORECASE)
+        tokens = nisar_base.split("_")
+        # Replace the two per-pair timestamp tokens (positions 11 & 12) with the range
+        if len(tokens) >= 14:
+            tokens[11] = f"{compact_start}T000000"
+            tokens[12] = f"{compact_end}T000000"
+            return "_".join(tokens) + f"-EBD_{ebd_stem}_ts_coh.vrt"
+
+    pol_tag = ""
+    m = re.search(r"_([A-Z]{2})_COH\.tif$", basename)
+    if m:
+        pol_tag = f"_{m.group(1).lower()}"
+    return f"coherence{pol_tag}_{compact_start}_{compact_end}_win{win_r}x{win_c}_ts.vrt"
+
+
+def build_coherence_vrt(results, output_dir, window_rows, window_cols,
+                        float32=False, output_fs=None, verbose=False):
+    """
+    Build a multi-band VRT stacking all successful coherence pair outputs,
+    sorted by reference date (label1) then secondary date (label2).
+
+    Each band description is ``"label1 / label2"`` so that the pair dates
+    are visible in GDAL/QGIS.  Source filenames use ``relativeToVRT="1"``
+    (basenames only) so the VRT is portable for both local and S3 output.
+
+    Parameters
+    ----------
+    results : list[dict]
+        Return value of :func:`process_coherence_pairs`.
+    output_dir : str
+        Directory / S3 prefix that received the coherence TIFs.
+    window_rows, window_cols : int
+        Coherence window (used in fallback VRT filename).
+    float32 : bool
+        Determines the VRT dtype (``float32`` or ``uint8``).
+    output_fs : fsspec.AbstractFileSystem or None
+        S3 filesystem for writing when *output_dir* is an s3:// URI.
+        Pass None for local output.
+    verbose : bool
+
+    Returns
+    -------
+    vrt_path : str or None
+        Path / S3 URI of the written VRT, or None if nothing was written.
+    """
+    ok = [r for r in results if r["success"]]
+    if not ok:
+        return None
+
+    out_dir = output_dir.rstrip("/")
+
+    # Sort by (label1, label2) -- YYYY-MM-DD strings sort lexicographically
+    ok_sorted = sorted(ok, key=lambda r: (r["label1"], r["label2"]))
+
+    label_start = ok_sorted[0]["label1"]
+    label_end   = ok_sorted[-1]["label2"]
+
+    # Read spatial metadata from the first coherence file
+    is_s3 = out_dir.startswith("s3://")
+    _env_kw = {}
+    if is_s3 and output_fs is not None:
+        # Build env kwargs from the fs credentials if available
+        creds = getattr(output_fs, "storage_options", {})
+        if "key" in creds:
+            _env_kw["AWS_ACCESS_KEY_ID"]     = creds["key"]
+            _env_kw["AWS_SECRET_ACCESS_KEY"] = creds.get("secret", "")
+        if "profile" in creds:
+            _env_kw["AWS_PROFILE"] = creds["profile"]
+
+    with rasterio.Env(**_env_kw):
+        with rasterio.open(ok_sorted[0]["path"]) as src:
+            width     = src.width
+            height    = src.height
+            transform = src.transform
+            crs_wkt   = src.crs.to_wkt()
+
+    dtype    = "float32" if float32 else "uint8"
+    nodata   = float("nan") if float32 else 255
+    vrt_name = _coh_vrt_filename(ok_sorted[0]["path"], label_start, label_end,
+                                  window_rows, window_cols)
+    vrt_path = f"{out_dir}/{vrt_name}"
+
+    # Build VRT XML (relativeToVRT="1" for all sources -- basenames only)
+    geo_transform = (
+        f"{transform.c}, {transform.a}, {transform.b}, "
+        f"{transform.f}, {transform.d}, {transform.e}"
+    )
+    from openseppo.nisar.nisar_tools import get_gdal_dtype, _format_nodata_val
+    vrt_dtype  = get_gdal_dtype(dtype)
+    nodata_val = _format_nodata_val(nodata, dtype)
+
+    lines = [
+        f'<VRTDataset rasterXSize="{width}" rasterYSize="{height}">',
+        f'  <SRS dataAxisToSRSAxisMapping="1,2">{crs_wkt}</SRS>',
+        f"  <GeoTransform>{geo_transform}</GeoTransform>",
+    ]
+    for i, r in enumerate(ok_sorted, 1):
+        desc     = f"{r['label1']} / {r['label2']}"
+        rel_path = os.path.basename(r["path"])
+        lines.append(
+            f'  <VRTRasterBand dataType="{vrt_dtype}" band="{i}">\n'
+            f'    <NoDataValue>{nodata_val}</NoDataValue>\n'
+            f'    <Description>{desc}</Description>\n'
+            f'    <Metadata>\n'
+            f'      <MDI key="Date">{r["label1"]}</MDI>\n'
+            f'      <MDI key="Date2">{r["label2"]}</MDI>\n'
+            f'    </Metadata>\n'
+            f'    <SimpleSource>\n'
+            f'      <SourceFilename relativeToVRT="1">{rel_path}</SourceFilename>\n'
+            f'      <SourceBand>1</SourceBand>\n'
+            f'      <SrcRect xOff="0" yOff="0" xSize="{width}" ySize="{height}" />\n'
+            f'      <DstRect xOff="0" yOff="0" xSize="{width}" ySize="{height}" />\n'
+            f'    </SimpleSource>\n'
+            f'  </VRTRasterBand>'
+        )
+    lines.append("</VRTDataset>")
+    vrt_xml = "\n".join(lines)
+
+    if is_s3:
+        with output_fs.open(vrt_path, "w") as fout:
+            fout.write(vrt_xml)
+    else:
+        os.makedirs(out_dir, exist_ok=True)
+        with open(vrt_path, "w") as fout:
+            fout.write(vrt_xml)
+
+    if verbose:
+        print(f"  VRT: {vrt_name}  ({len(ok_sorted)} band(s))")
+
+    return vrt_path

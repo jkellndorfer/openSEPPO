@@ -137,6 +137,12 @@ def myargsparse(a):
         help="AWS profile for writing output files (overrides --profile).",
     )
 
+    # --- VRT ---
+    parser.add_argument(
+        "-no_vrt", "--no_vrt", action="store_true", dest="no_vrt",
+        help="Disable building a time-series VRT stacking all coherence pairs.",
+    )
+
     # --- Misc ---
     parser.add_argument(
         "-v", "--verbose", action="store_true",
@@ -189,6 +195,11 @@ def processing(args):
         f"format={args.output_format}  |  dtype={dtype_label}"
     )
 
+    output_fs = None
+    if args.output.startswith("s3://"):
+        from openseppo.nisar.nisar_tools import create_s3_fs
+        output_fs = create_s3_fs(get_auth_dict(args.output_profile or args.profile))
+
     results, msg = nisar_tools_coherence.process_coherence_pairs(
         input_paths=args.input,
         output_dir=args.output,
@@ -217,6 +228,19 @@ def processing(args):
         print(f"\nFailed ({len(fail)}):")
         for r in fail:
             print(f"  {r['label1']} x {r['label2']}: {r['error']}")
+
+    if ok and not args.no_vrt:
+        vrt_path = nisar_tools_coherence.build_coherence_vrt(
+            results=results,
+            output_dir=args.output,
+            window_rows=win_r,
+            window_cols=win_c,
+            float32=args.no_dn,
+            output_fs=output_fs,
+            verbose=args.verbose,
+        )
+        if vrt_path:
+            print(f"\nVRT: {vrt_path}")
 
     if fail:
         sys.exit(1)
