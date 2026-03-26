@@ -557,21 +557,20 @@ def _process_single_file_gslc(
         else:
             file_url = h5_url
 
-        # --- Metadata: try datatree first (local only), fall back to h5py ---
+        # --- Metadata: always use h5py for grid info (reads only 2 coords, fast).
+        # Datatree is used only for acquisition metadata where it adds value.
         dt = open_datatree_lazy(file_url, input_fs, verbose=verbose)
         use_datatree = (dt is not None)
 
-        info = None
         acq_meta = None
         if use_datatree:
-            info = get_grid_info_from_datatree_gslc(dt, frequency=frequency)
             acq_meta = get_acquisition_metadata_from_datatree_gslc(dt)
 
         f = open_h5_lazy(file_url, input_fs)
-        if info is None:
-            info = get_grid_info_gslc(f, frequency=frequency)
+        info = get_grid_info_gslc(f, frequency=frequency)
         if acq_meta is None:
             acq_meta = get_acquisition_metadata_gslc(f)
+
         f.close()
 
         # Inject processing metadata
@@ -588,9 +587,9 @@ def _process_single_file_gslc(
 
         date_str = acq_meta.get("ACQUISITION_DATE", "Unknown")
         if verbose:
-            mode_label = "datatree" if use_datatree else "h5py"
+            meta_label = "h5py+datatree" if use_datatree else "h5py"
             print(f"    Date: {date_str} | Grid: {info['res_x']:.1f}m ({frequency}) "
-                  f"| Mode: {mode_label} | Transform: {mode_str}", flush=True)
+                  f"| Meta: {meta_label} | Transform: {mode_str}", flush=True)
 
         # --- Reprojection setup ---
         input_crs_obj = _parse_crs(info["crs"])
@@ -618,8 +617,9 @@ def _process_single_file_gslc(
                 _sq_y = max(1, round(_coarser / _nat_y))
                 downscale_factor = (_sq_x, _sq_y)
                 if verbose:
+                    _sq_method = "nearest" if (_phase_mode or _cslc_mode) else "block average"
                     print(f"    --square: native {_nat_x:.4g}x{_nat_y:.4g} m -> "
-                          f"downscale ({_sq_x},{_sq_y}) -> "
+                          f"downscale ({_sq_x},{_sq_y}) [{_sq_method}] -> "
                           f"{_nat_x*_sq_x:.4g}x{_nat_y*_sq_y:.4g} m", flush=True)
 
         # --- Auto pre-downscale from -tr ---
