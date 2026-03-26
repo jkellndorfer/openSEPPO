@@ -44,6 +44,7 @@ import re
 import numpy as np
 import rasterio
 from rasterio.io import MemoryFile
+from rasterio.transform import Affine
 
 
 # ---------------------------------------------------------------------------
@@ -417,6 +418,110 @@ def _build_env_kwargs(auth):
 
 
 # ---------------------------------------------------------------------------
+# Post-processing: crop / downscale / reproject
+# ---------------------------------------------------------------------------
+
+
+def _post_process_coh(coh, transform, crs, projwin=None, downscale=None,
+                      target_srs=None, target_res=None, num_threads=None):
+    """
+    Apply optional post-processing to a coherence float32 array.
+
+    Order: projwin crop → block-average downscale → reproject.
+
+    Parameters
+    ----------
+    coh : np.ndarray, float32, shape (H, W)
+    transform : rasterio.transform.Affine
+    crs : rasterio.crs.CRS
+    projwin : (ulx, uly, lrx, lry) in the raster CRS, or None
+    downscale : int or (factor_y, factor_x) tuple, or None
+    target_srs : CRS string / EPSG / WKT, or None
+    target_res : float or (xres, yres) tuple (map units), or None
+    num_threads : int or None
+
+    Returns
+    -------
+    (coh, transform, crs)  -- updated arrays/metadata
+    """
+    from openseppo.nisar.nisar_tools import perform_downscaling
+
+    # 1. projwin crop
+    if projwin is not None:
+        import rasterio.windows
+        ulx, uly, lrx, lry = projwin
+        win = rasterio.windows.from_bounds(ulx, lry, lrx, uly, transform)
+        win = win.round_offsets().round_lengths()
+        row_off = max(0, int(win.row_off))
+        col_off = max(0, int(win.col_off))
+        h0, w0  = coh.shape
+        win_h   = max(1, min(int(win.height), h0 - row_off))
+        win_w   = max(1, min(int(win.width),  w0 - col_off))
+        coh = coh[row_off : row_off + win_h, col_off : col_off + win_w]
+        transform = Affine(
+            transform.a, transform.b,
+            transform.c + col_off * transform.a,
+            transform.d, transform.e,
+            transform.f + row_off * transform.e,
+        )
+
+    # 2. Block-average downscale
+    if downscale is not None:
+        if isinstance(downscale, (tuple, list)):
+            df_y, df_x = int(downscale[0]), int(downscale[1])
+        else:
+            df_y = df_x = int(downscale)
+        if df_y > 1 or df_x > 1:
+            coh = perform_downscaling(coh[np.newaxis], (df_y, df_x))[0]
+            transform = Affine(
+                transform.a * df_x, transform.b, transform.c,
+                transform.d, transform.e * df_y, transform.f,
+            )
+
+    # 3. Reproject
+    if target_srs is not None or target_res is not None:
+        from rasterio.warp import calculate_default_transform as _cdt
+        from rasterio.warp import reproject, Resampling
+        from rasterio.crs import CRS as _CRS
+
+        src_crs = crs if isinstance(crs, _CRS) else _CRS.from_user_input(crs)
+        dst_crs = _CRS.from_user_input(target_srs) if target_srs else src_crs
+
+        h, w = coh.shape
+        resolution = None
+        if target_res is not None:
+            resolution = (float(target_res[0]), float(target_res[1])) \
+                if isinstance(target_res, (tuple, list)) else float(target_res)
+
+        dst_transform, dst_w, dst_h = _cdt(
+            src_crs, dst_crs, w, h, transform, resolution=resolution,
+        )
+
+        n_threads = num_threads if num_threads is not None else (os.cpu_count() or 1)
+        dst_arr = np.full((dst_h, dst_w), np.nan, dtype=np.float32)
+        reproject(
+            source=coh.astype(np.float32),
+            destination=dst_arr,
+            src_transform=transform,
+            src_crs=src_crs,
+            dst_transform=dst_transform,
+            dst_crs=dst_crs,
+            src_nodata=np.nan,
+            dst_nodata=np.nan,
+            resampling=Resampling.bilinear,
+            num_threads=n_threads,
+        )
+        # Coherence must stay in [0, 1]
+        finite = np.isfinite(dst_arr)
+        dst_arr = np.where(finite, np.clip(dst_arr, 0.0, 1.0), dst_arr)
+        coh = dst_arr
+        transform = dst_transform
+        crs = dst_crs
+
+    return coh, transform, crs
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -432,6 +537,10 @@ def process_coherence_pairs(
     input_auth=None,
     output_auth=None,
     num_threads=None,
+    projwin=None,
+    downscale=None,
+    target_srs=None,
+    target_res=None,
     verbose=False,
 ):
     """
@@ -461,6 +570,16 @@ def process_coherence_pairs(
         Auth dicts with optional keys ``profile``, ``key``/``secret``/``token``.
     num_threads : int | None
         GDAL compression threads.  None -> all available CPUs.
+    projwin : (ulx, uly, lrx, lry) | None
+        Crop output to this bounding box (map coordinates in the input CRS).
+        Applied after coherence estimation.
+    downscale : int or (factor_y, factor_x) | None
+        Block-average downscale factor applied after crop and before reproject.
+    target_srs : str | None
+        Output CRS (EPSG code, WKT, PROJ string).  Triggers a bilinear warp.
+    target_res : float or (xres, yres) | None
+        Output pixel size in target CRS map units.  Used with ``target_srs``;
+        if given alone, warps in the same CRS to the requested resolution.
     verbose : bool
 
     Returns
@@ -583,6 +702,19 @@ def process_coherence_pairs(
                 )
                 del z1, z2
                 gc.collect()
+
+                # Post-processing: crop, downscale, reproject
+                _need_post = (projwin is not None or downscale is not None
+                              or target_srs is not None or target_res is not None)
+                if _need_post:
+                    coh, transform, crs = _post_process_coh(
+                        coh, transform, crs,
+                        projwin=projwin,
+                        downscale=downscale,
+                        target_srs=target_srs,
+                        target_res=target_res,
+                        num_threads=num_threads,
+                    )
 
                 # Output filename
                 if vrt_meta is not None:

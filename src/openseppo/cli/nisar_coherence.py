@@ -37,6 +37,15 @@ Usage examples:
 
 5. Verbose sequential pairs with all CPUs:
     seppo_nisar_coherence -i *.tif -o out/ -v
+
+6. Crop + downscale 2x after coherence estimation:
+    seppo_nisar_coherence -i *.tif -o out/ -projwin 847242 2570282 892239 2527678 -d 2
+
+7. Reproject to geographic (EPSG:4326) at 0.0002 deg resolution:
+    seppo_nisar_coherence -i *.tif -o out/ -t_srs EPSG:4326 -tr 0.0002
+
+8. Anisotropic downscale (2x cols, 4x rows):
+    seppo_nisar_coherence -i *.tif -o out/ -d 2 4
 """
 
 import sys
@@ -123,6 +132,28 @@ def myargsparse(a):
              "the default uint8 DN encoding (DN = round(coh * 200), nodata=255).",
     )
 
+    # --- Post-processing: crop / downscale / reproject ---
+    parser.add_argument(
+        "-projwin", "--projwin", nargs=4, type=float, metavar=("ULX", "ULY", "LRX", "LRY"),
+        help="Crop output to this bounding box (map coords in the input CRS, applied "
+             "after coherence estimation).  ulx uly lrx lry.",
+    )
+    parser.add_argument(
+        "-d", "--downscale", nargs="+", type=int, metavar="N",
+        help="Block-average downscale factor applied after crop.  One integer "
+             "(isotropic) or two integers X Y (columns rows).",
+    )
+    parser.add_argument(
+        "-t_srs", "--t_srs", type=str, dest="t_srs",
+        help="Output CRS for reprojection (EPSG:XXXX, WKT, or PROJ string).  "
+             "Coherence is resampled with bilinear interpolation.",
+    )
+    parser.add_argument(
+        "-tr", "--tr", nargs="+", type=float, metavar="RES",
+        help="Output pixel size in target CRS map units.  One value (square) or "
+             "two values X Y.  Can be combined with -t_srs.",
+    )
+
     # --- Auth ---
     parser.add_argument(
         "--profile", type=str,
@@ -160,6 +191,25 @@ def myargsparse(a):
         if v < 1:
             parser.error("-window values must be positive integers.")
 
+    # Normalise -d to int (isotropic) or (factor_y, factor_x) tuple
+    if args.downscale is not None:
+        if len(args.downscale) == 1:
+            args.downscale = args.downscale[0]
+        elif len(args.downscale) == 2:
+            # CLI gives X Y (cols, rows); internally we need (factor_y, factor_x)
+            args.downscale = (args.downscale[1], args.downscale[0])
+        else:
+            parser.error("-d accepts 1 integer (isotropic) or 2 integers X Y.")
+
+    # Normalise -tr to float (square) or (xres, yres) tuple
+    if args.tr is not None:
+        if len(args.tr) == 1:
+            args.tr = args.tr[0]
+        elif len(args.tr) == 2:
+            args.tr = tuple(args.tr)
+        else:
+            parser.error("-tr accepts 1 value (square) or 2 values X Y.")
+
     if args.verbose:
         pprint(vars(args))
 
@@ -194,6 +244,16 @@ def processing(args):
         f"window={win_r}x{win_c}  |  pairs={args.pairs}  |  "
         f"format={args.output_format}  |  dtype={dtype_label}"
     )
+    if args.projwin:
+        print(f"  projwin: {args.projwin}")
+    if args.downscale:
+        _d = args.downscale
+        d_str = (f"{_d[1]}x{_d[0]}" if isinstance(_d, tuple) else str(_d))
+        print(f"  downscale: {d_str}")
+    if args.t_srs:
+        print(f"  t_srs: {args.t_srs}")
+    if args.tr:
+        print(f"  tr: {args.tr}")
 
     output_fs = None
     if args.output.startswith("s3://"):
@@ -211,6 +271,10 @@ def processing(args):
         input_auth=input_auth,
         output_auth=output_auth,
         num_threads=None,
+        projwin=args.projwin,
+        downscale=args.downscale,
+        target_srs=args.t_srs,
+        target_res=args.tr,
         verbose=args.verbose,
     )
 
