@@ -483,9 +483,10 @@ def _post_process_coh(coh, transform, crs, projwin=None, downscale=None,
         from rasterio.warp import calculate_default_transform as _cdt
         from rasterio.warp import reproject, Resampling
         from rasterio.crs import CRS as _CRS
+        from openseppo.nisar.nisar_tools import _parse_crs
 
-        src_crs = crs if isinstance(crs, _CRS) else _CRS.from_user_input(crs)
-        dst_crs = _CRS.from_user_input(target_srs) if target_srs else src_crs
+        src_crs = crs if isinstance(crs, _CRS) else _parse_crs(crs)
+        dst_crs = _parse_crs(target_srs) if target_srs else src_crs
 
         h, w = coh.shape
         resolution = None
