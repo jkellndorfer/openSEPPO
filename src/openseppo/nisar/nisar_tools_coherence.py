@@ -494,8 +494,15 @@ def _post_process_coh(coh, transform, crs, projwin=None, downscale=None,
             resolution = (float(target_res[0]), float(target_res[1])) \
                 if isinstance(target_res, (tuple, list)) else float(target_res)
 
+        _left   = transform.c
+        _top    = transform.f
+        _right  = transform.c + w * transform.a
+        _bottom = transform.f + h * transform.e  # e is negative for north-up
+
         dst_transform, dst_w, dst_h = _cdt(
-            src_crs, dst_crs, w, h, transform=transform, resolution=resolution,
+            src_crs, dst_crs, w, h,
+            left=_left, bottom=_bottom, right=_right, top=_top,
+            resolution=resolution,
         )
 
         n_threads = num_threads if num_threads is not None else (os.cpu_count() or 1)
