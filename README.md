@@ -13,7 +13,10 @@ scale readily with the [SEPPO](https://earthbigdata.com/seppo) software by
 
 | Command | Description |
 |---------|-------------|
-| `seppo_nisar_gcov_convert` | Convert NISAR GCOV HDF5 to Cloud Optimized GeoTIFF (COG), BigTIFF, or HDF5 subset with optional reprojection, downscaling, and VRT time-series stacking |
+| `seppo_nisar_gcov_convert` | Convert NISAR GCOV HDF5 to Cloud Optimized GeoTIFF (COG), BigTIFF, or HDF5 subset with optional sigma0 conversion, reprojection, downscaling, and VRT time-series stacking |
+| `seppo_nisar_gcov_convert_S` | S-band variant of `seppo_nisar_gcov_convert` |
+| `seppo_nisar_gslc_convert` | Convert NISAR GSLC HDF5 complex data to COG: power, amplitude, magnitude, wrapped phase, or raw complex SLC (`-cslc`); supports reprojection, downscaling, and VRT stacking |
+| `seppo_nisar_coherence` | Compute pairwise interferometric coherence from co-registered NISAR GSLC complex SLC files with optional crop, downscale, and reprojection |
 | `seppo_nisar_search` | Search NISAR product URLs via NASA Earthdata CMR |
 | `seppo_earthaccess_credentials` | Manage NASA Earthdata S3 credentials and bearer token |
 
@@ -28,7 +31,7 @@ credential configuration.
 Quick start:
 
 ```bash
-conda create -n openseppo -c conda-forge "python>=3.12" openseppo aria2
+mamba create -n openseppo -c conda-forge openseppo aria2
 conda activate openseppo
 ```
 
