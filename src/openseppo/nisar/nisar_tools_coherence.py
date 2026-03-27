@@ -495,7 +495,7 @@ def _post_process_coh(coh, transform, crs, projwin=None, downscale=None,
                 if isinstance(target_res, (tuple, list)) else float(target_res)
 
         dst_transform, dst_w, dst_h = _cdt(
-            src_crs, dst_crs, w, h, transform, resolution=resolution,
+            src_crs, dst_crs, w, h, transform=transform, resolution=resolution,
         )
 
         n_threads = num_threads if num_threads is not None else (os.cpu_count() or 1)
