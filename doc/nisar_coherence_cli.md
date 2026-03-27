@@ -23,7 +23,7 @@ seppo_nisar_coherence [-h] -i INPUT [INPUT ...] -o OUTPUT
                       [-window N [N ...]] [-pairs {sequential,all}]
                       [-of {COG,GTiff}] [-no_DN]
                       [-projwin ULX ULY LRX LRY] [-projwin_srs CRS]
-                      [-d N [N ...]] [-t_srs T_SRS] [-tr RES [RES ...]]
+                      [-d N | -d Nx Ny] [-t_srs T_SRS] [-tr RES [RES ...]]
                       [--profile PROFILE] [--input_profile INPUT_PROFILE]
                       [--output_profile OUTPUT_PROFILE]
                       [-no_vrt] [-v]

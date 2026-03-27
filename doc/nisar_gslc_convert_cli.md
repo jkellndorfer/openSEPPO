@@ -11,7 +11,7 @@ seppo_nisar_gslc_convert [-h] [-i H5 [H5 ...]] [-o OUTPUT]
                          [-vars VARS [VARS ...]] [-f {A,B}] [-lg] [-lv]
                          [-pwr | -amp | -mag | -phase | -cslc]
                          [-of {COG,GTiff,h5}]
-                         [-d N [N ...]] [--square]
+                         [-d N | -d Nx Ny] [--square]
                          [--no_vrt] [--no_time_series] [--no_single_bands]
                          [-srcwin XOFF YOFF XSIZE YSIZE | -projwin ULX ULY LRX LRY]
                          [-projwin_srs CRS]
@@ -61,7 +61,7 @@ Exactly one mode may be selected. Default is `-pwr`.
 
 | Argument | Description |
 |----------|-------------|
-| `-d N [N ...]`, `--downscale` | Downscale factor: one integer for isotropic (e.g. `-d 2`) or two integers **X Y** for anisotropic (columns then rows, e.g. `-d 2 4`). Block-average for pwr/amp/mag; nearest decimation for phase/cslc. |
+| `-d N` or `-d Nx Ny`, `--downscale` | Downscale factor. One integer applies the same factor to both range (X) and azimuth (Y). Two integers set range and azimuth factors independently (e.g. `-d 2 4` for 2× in range, 4× in azimuth). Block-average for pwr/amp/mag; nearest decimation for phase/cslc. |
 | `--square` | Auto-downscale to square pixels by averaging along the finer native axis. Example: 20 MHz data (10 m × 5 m) → 10 m × 10 m; 77 MHz data (2.5 m × 5 m) → 5 m × 5 m. 40 MHz data is already square. Ignored if `-d` is also supplied. |
 
 ### Spatial Subsetting
@@ -140,7 +140,7 @@ NISAR GSLC geocoded pixels have fixed Y (azimuth) spacing of ~5 m; X (range) spa
 | 20 MHz | ~10 m | ~5 m | ~10 m × 10 m | Standard mapping, coherence |
 | 5 MHz | ~40 m | ~5 m | ~40 m × 40 m | Wide-area backscatter |
 
-Use `--square` to produce square pixels in one step, or `-d X Y` for explicit anisotropic control.
+Use `--square` to produce square pixels in one step, or `-d Nx Ny` to set range and azimuth downscale factors explicitly.
 
 ---
 
@@ -179,7 +179,7 @@ seppo_nisar_gslc_convert -i file.h5 -o out/ -amp \
     -projwin 72.39 23.21 72.82 22.81 -projwin_srs EPSG:4326 \
     -t_srs 4326 -tr 0.0001 0.0001
 
-# 10. HH only, anisotropic downscale 2x cols × 4x rows
+# 10. HH only, 2x range × 4x azimuth downscale
 seppo_nisar_gslc_convert -i file.h5 -o out/ -pwr -vars HH -d 2 4
 
 # 11. Process a list of S3 URLs, write to S3
