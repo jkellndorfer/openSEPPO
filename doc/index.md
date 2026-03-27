@@ -14,6 +14,8 @@ work standalone** (on-premise, your laptop, cloud instances, ...),  and to integ
 | Command | Description |
 |---------|-------------|
 | `seppo_nisar_gcov_convert` | Convert NISAR GCOV HDF5 to Cloud Optimized GeoTIFF (COG), BigTIFF, or HDF5 subset with optional sigma0 conversion, reprojection, downscaling, and VRT time-series stacking |
+| `seppo_nisar_gslc_convert` | Convert NISAR GSLC HDF5 complex data to COG: power, amplitude, magnitude, wrapped phase, or raw complex SLC with optional reprojection, downscaling, and VRT stacking |
+| `seppo_nisar_coherence` | Compute pairwise interferometric coherence from co-registered NISAR GSLC complex SLC files with optional crop, downscale, and reprojection |
 | `seppo_nisar_search` | Search NISAR product URLs via NASA Earthdata CMR |
 | `seppo_earthaccess_credentials` | Manage NASA Earthdata S3 credentials and bearer token |
 
@@ -39,7 +41,7 @@ seppo_nisar_gcov_convert -i urls.txt -o out/ \
     -amp -projwin 636357 3497674 655829 3480149 -tr 20 20 -v
 ```
 
-**-> [Full Quick Start guide with variants and output description](quickstart.md)**
+**-> [Full Quick Start guide (GCOV and GSLC workflows)](quickstart.md)**
 
 See [Installation](installation.md) for pip, local clone, and credential setup options.
 
@@ -55,6 +57,14 @@ See [Installation](installation.md) for pip, local clone, and credential setup o
 - [CLI Reference](nisar_gcov_convert_cli.md)
 - [Examples](nisar_gcov_convert_examples.md)
 - [Dual-pol Ratio](ratio.md)
+
+**seppo_nisar_gslc_convert**
+
+- [CLI Reference](nisar_gslc_convert_cli.md)
+
+**seppo_nisar_coherence**
+
+- [CLI Reference](nisar_coherence_cli.md)
 
 **seppo_nisar_search**
 

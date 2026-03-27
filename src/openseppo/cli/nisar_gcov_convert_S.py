@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-seppo_nisar_gcov_convert -- NISAR GCOV HDF5 to Cloud Optimized GeoTIFF converter
+seppo_nisar_gcov_convert_S -- NISAR S-band GCOV HDF5 to Cloud Optimized GeoTIFF converter
 *********************************************************************************
 openSEPPO -- Open SEPPO Tools
 Supporting Geospatial and Remote Sensing Data Processing
@@ -9,8 +9,9 @@ Supporting Geospatial and Remote Sensing Data Processing
 Licensed under the Apache License, Version 2.0
 https://github.com/EarthBigData/openSEPPO
 
-Convert NISAR GCOV HDF5 files to Cloud Optimized GeoTIFF (COG) with optional
-reprojection, downscaling, VRT time-series stacking, and dual-pol ratio output.
+Convert NISAR S-band GCOV HDF5 files to Cloud Optimized GeoTIFF (COG) with
+optional reprojection, downscaling, VRT time-series stacking, coherence, and
+RH/RV ratio output.
 
 Usage Examples:
 1. Standard conversion (default power, float32):
@@ -41,12 +42,13 @@ from collections import defaultdict
 import math
 import rasterio
 from rasterio.transform import from_origin
-import openseppo.nisar.nisar_tools as nisar_tools
+import openseppo.nisar.nisar_tools_S as nisar_tools
 
 
 # -- seppo_parse_args shim -----------------------------------------------------
 # Drops the config-file override feature from seppopy.tools.args; all CLI flags
 # are preserved and work identically.
+
 
 def seppo_parse_args(parser, a):
     return parser.parse_args(a[1:])
@@ -69,7 +71,7 @@ def myargsparse(a):
         a = shlex.split(a)
 
     thisProg = os.path.basename(a[0])
-    description = "Convert NISAR HDF5 GCOV data to Cloud Optimized GeoTIFF (COG) with optional VRT stacking."
+    description = "Convert NISAR S-band HDF5 GCOV data to Cloud Optimized GeoTIFF (COG) with optional VRT stacking."
 
     epilog = ""
 
@@ -80,7 +82,7 @@ def myargsparse(a):
     parser.add_argument("-o", "--output", type=str, required=False, help="Output directory path (S3 or local). Must end in '/' for batch processing.")
 
     # Defaults set to None to allow auto-detection in nisar_tools
-    parser.add_argument("-vars", "--vars", nargs="+", default=None, help="Grid Variables to extract, e.g. HHHH HVHV. If omitted, ALL variables for the frequency are used.")
+    parser.add_argument("-vars", "--vars", nargs="+", default=None, help="Grid Variables to extract, e.g. RHRH RVRV RHRV. If omitted, RHRH and RVRV are used by default.")
     parser.add_argument("-f", "--freq", type=str, default="A", help="Frequency (A/B). If omitted, defaults to A", choices=["A", "B"])
 
     # List Grids Flag
@@ -95,12 +97,10 @@ def myargsparse(a):
     mode_group.add_argument("-pwr", "--power", action="store_const", dest="mode", const="pwr", help="Set scaling mode to Power (raw float32). Default behavior.")
 
     # --- Output Format ---
-    parser.add_argument("-of", "--output_format", type=str, default="COG",
-                        choices=["COG", "GTiff", "h5"],
-                        help="Output format: COG (default), GTiff (BigTIFF), h5 (raw HDF5 subset).")
+    parser.add_argument("-of", "--output_format", type=str, default="COG", choices=["COG", "GTiff", "h5"], help="Output format: COG (default), GTiff (BigTIFF), h5 (raw HDF5 subset).")
 
     # --- Other Processing Options ---
-    parser.add_argument("-dpratio", "--dualpol_ratio", action="store_true", help="Compute dual-pol power ratio: HHHH/HVHV (DH mode) or VVVV/VHVH (DV mode). Incompatible with QP or single-pol acquisitions.")
+    parser.add_argument("-dpratio", "--dualpol_ratio", action="store_true", help="Compute S-band RH/RV power ratio: RHRH/RVRV (CR mode).")
     parser.add_argument("-sigma0", "--sigma0", action="store_true", help="Convert gamma0 backscatter to sigma0 by multiplying power values with the rtcGammaToSigmaFactor layer from the GCOV file. Applied before any downscaling or resampling.")
     parser.add_argument("-d", "--downscale", type=int, default=None, help="Downscale factor (integer). E.g., 2 for 2x2 block averaging.")
 
@@ -276,14 +276,10 @@ def _read_tif_geo(tif_path, output_fs=None):
             with output_fs.open(tif_path, "rb") as fobj:
                 with rasterio.open(fobj) as ds:
                     tags = ds.tags()
-                    return {"transform": ds.transform, "w": ds.width, "h": ds.height,
-                            "crs_wkt": ds.crs.to_wkt(), "dtype": ds.dtypes[0],
-                            "nodata": ds.nodata, "tags": tags}
+                    return {"transform": ds.transform, "w": ds.width, "h": ds.height, "crs_wkt": ds.crs.to_wkt(), "dtype": ds.dtypes[0], "nodata": ds.nodata, "tags": tags}
         with rasterio.open(tif_path) as ds:
             tags = ds.tags()
-            return {"transform": ds.transform, "w": ds.width, "h": ds.height,
-                    "crs_wkt": ds.crs.to_wkt(), "dtype": ds.dtypes[0],
-                    "nodata": ds.nodata, "tags": tags}
+            return {"transform": ds.transform, "w": ds.width, "h": ds.height, "crs_wkt": ds.crs.to_wkt(), "dtype": ds.dtypes[0], "nodata": ds.nodata, "tags": tags}
     except Exception:
         return None
 
@@ -350,16 +346,7 @@ def _generate_mosaic_vrt_xml(frame_items, crs_wkt, dtype, metadata=None):
         dx = int(round((it["transform"].c - union_ulx) / res_x))
         dy = int(round((union_uly - it["transform"].f) / res_y))
         src_path, rel_attr = _vrt_src_entry(it["path"])
-        lines.append(
-            f"    <ComplexSource>\n"
-            f'      <SourceFilename relativeToVRT="{rel_attr}">{src_path}</SourceFilename>\n'
-            f"      <SourceBand>1</SourceBand>\n"
-            f'      <SourceProperties RasterXSize="{it["w"]}" RasterYSize="{it["h"]}" DataType="{vrt_dtype}" BlockXSize="512" BlockYSize="512" />\n'
-            f'      <SrcRect xOff="0" yOff="0" xSize="{it["w"]}" ySize="{it["h"]}" />\n'
-            f'      <DstRect xOff="{dx}" yOff="{dy}" xSize="{it["w"]}" ySize="{it["h"]}" />\n'
-            f"      <NODATA>{nodata_val}</NODATA>\n"
-            f"    </ComplexSource>"
-        )
+        lines.append(f"    <ComplexSource>\n" f'      <SourceFilename relativeToVRT="{rel_attr}">{src_path}</SourceFilename>\n' f"      <SourceBand>1</SourceBand>\n" f'      <SourceProperties RasterXSize="{it["w"]}" RasterYSize="{it["h"]}" DataType="{vrt_dtype}" BlockXSize="512" BlockYSize="512" />\n' f'      <SrcRect xOff="0" yOff="0" xSize="{it["w"]}" ySize="{it["h"]}" />\n' f'      <DstRect xOff="{dx}" yOff="{dy}" xSize="{it["w"]}" ySize="{it["h"]}" />\n' f"      <NODATA>{nodata_val}</NODATA>\n" f"    </ComplexSource>")
     lines += [
         "  </VRTRasterBand>",
         '  <OverviewList resampling="nearest">2 4 8</OverviewList>',
@@ -443,9 +430,7 @@ def _track_vrt_filename(metas, pol_str, mode_str):
         ebd = f"-EBD_{freq}_{pol_str}_{mode_str}.vrt"
     else:
         ebd = f"-EBD_{freq}_{pol_str}.vrt"
-    return (f"NISAR_{il}_{pt}_{prod}_{cycle_str}_{track_str}_{dir_str}_"
-            f"{frame_str}_{mode}_{pol}_{obs_mode}_{min_start}_{max_end}"
-            f"{ebd}")
+    return f"NISAR_{il}_{pt}_{prod}_{cycle_str}_{track_str}_{dir_str}_" f"{frame_str}_{mode}_{pol}_{obs_mode}_{min_start}_{max_end}" f"{ebd}"
 
 
 def _make_ts_vrt(ts_items, crs_wkt, dtype, nodata=None, metadata=None):
@@ -461,6 +446,7 @@ def _make_ts_vrt(ts_items, crs_wkt, dtype, nodata=None, metadata=None):
 def _list_vrts_in_dir(out_dir, output_fs):
     """Return all .vrt paths in out_dir (S3 or local)."""
     import glob as _glob
+
     if output_fs:
         bucket_path = out_dir.replace("s3://", "")
         try:
@@ -506,8 +492,7 @@ def show_output_summary(output_path, frequency, output_auth=None, vsis3=False):
     anc_suffixes = tuple(f"_{s}.tif" for s in _KNOWN_ANC_SUFFIXES)
     anc_vrt_suffixes = tuple(f"_{s}.vrt" for s in _KNOWN_ANC_SUFFIXES)
 
-    summary = {"backscatter": {"single_dates": [], "mosaics": [], "ts_by_track": [], "combined_ts": []},
-               "ancillary":   {"single_dates": [], "mosaics": [], "ts_by_track": [], "combined_ts": []}}
+    summary = {"backscatter": {"single_dates": [], "mosaics": [], "ts_by_track": [], "combined_ts": []}, "ancillary": {"single_dates": [], "mosaics": [], "ts_by_track": [], "combined_ts": []}}
 
     for f in tifs:
         if any(f.endswith(s) for s in anc_suffixes):
@@ -558,11 +543,15 @@ def _print_vrt_summary(output_path, summary, vsis3=False):
             print(bucket)
 
         if vsis3:
+
             def key(p):
                 return "/vsis3/" + p[5:] if p.startswith("s3://") else p
+
         else:
+
             def key(p):
                 return p.replace("s3://", "").split("/", 1)[1]
+
     else:
         print(f"\n{_green('---> Path:')}")
         print(output_path.rstrip("/"))
@@ -650,6 +639,7 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
     _local_vrt_dir = None
     if _is_s3:
         import tempfile as _tempfile
+
         _local_vrt_dir = _tempfile.mkdtemp(prefix="openseppo_vrts_")
 
     def write_vrt(path, xml_str):
@@ -668,13 +658,13 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
         if not _local_vrt_dir or not _is_s3:
             return
         import subprocess
-        cmd = ["aws", "s3", "sync", _local_vrt_dir, out_dir + "/",
-               "--exclude", "*", "--include", "*.vrt", "--include", "*.txt",
-               "--no-progress"]
+
+        cmd = ["aws", "s3", "sync", _local_vrt_dir, out_dir + "/", "--exclude", "*", "--include", "*.vrt", "--include", "*.txt", "--no-progress"]
         if verbose:
             print(f"    Syncing VRTs to {out_dir}/...", flush=True)
         subprocess.run(cmd, check=True)
         import shutil
+
         shutil.rmtree(_local_vrt_dir, ignore_errors=True)
 
     # --- Collect all TIFs (backscatter + ancillary) and parse metadata ---
@@ -698,8 +688,7 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
     for (trk, dir_), group in _td_groups.items():
         # Read geo from the first backscatter TIF (has tags like RADIOMETRY);
         # fall back to first ancillary if no backscatter in group.
-        _sample = next((fp for fp, m in group if not m["is_ancillary"]),
-                       group[0][0])
+        _sample = next((fp for fp, m in group if not m["is_ancillary"]), group[0][0])
         geo = _read_tif_geo(_sample, output_fs)
         if geo is not None:
             _geo_cache[(trk, dir_)] = geo
@@ -728,9 +717,7 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
     _radiometries = {m["tags"].get("RADIOMETRY") for m in bsc_metas if m.get("tags")}
     _radiometries.discard(None)
     if len(_radiometries) > 1:
-        print(f"  WARNING: mixed radiometry found ({_radiometries}). "
-              f"Cannot build VRTs from inconsistent data. "
-              f"Reprocess with a single radiometry setting.", file=sys.stderr)
+        print(f"  WARNING: mixed radiometry found ({_radiometries}). " f"Cannot build VRTs from inconsistent data. " f"Reprocess with a single radiometry setting.", file=sys.stderr)
         _print_vrt_summary(output_path, summary={"backscatter": {}, "ancillary": {}}, vsis3=vsis3)
         return
 
@@ -743,12 +730,10 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
                 _vrt_meta[_k] = _src_tags[_k]
 
     if verbose and all_metas:
-        print(f"  build_track_vrts: {len(bsc_metas)} backscatter + {len(anc_metas)} ancillary TIFs "
-              f"across {len({m['track'] for m in all_metas})} track(s).")
+        print(f"  build_track_vrts: {len(bsc_metas)} backscatter + {len(anc_metas)} ancillary TIFs " f"across {len({m['track'] for m in all_metas})} track(s).")
 
     # Accumulate results for the summary display
-    summary = {"backscatter": {"single_dates": [], "mosaics": [], "ts_by_track": [], "combined_ts": []},
-               "ancillary":   {"single_dates": [], "mosaics": [], "ts_by_track": [], "combined_ts": []}}
+    summary = {"backscatter": {"single_dates": [], "mosaics": [], "ts_by_track": [], "combined_ts": []}, "ancillary": {"single_dates": [], "mosaics": [], "ts_by_track": [], "combined_ts": []}}
 
     # ======================================================================
     # Process each category (backscatter, then ancillary) through 4 phases
@@ -801,10 +786,7 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
                             min_st = min(m["start_time"] for m in frame_items)
                             max_et = max(m["end_time"] for m in frame_items)
                             ebd = f"-EBD_{frequency}_{pol_str}_{_ms}.vrt" if _ms else f"-EBD_{frequency}_{pol_str}.vrt"
-                            mosaic_name = (f"NISAR_{m0['il']}_{m0['pt']}_{m0['prod']}_{cycle:03d}_{track:03d}_"
-                                           f"{direction}_{min_fr:03d}-{max_fr:03d}_{m0['mode']}_{m0['polarization']}_"
-                                           f"{m0['obs_mode']}_{min_st}_{max_et}_{m0['crid']}_{m0['accuracy']}"
-                                           f"{ebd}")
+                            mosaic_name = f"NISAR_{m0['il']}_{m0['pt']}_{m0['prod']}_{cycle:03d}_{track:03d}_" f"{direction}_{min_fr:03d}-{max_fr:03d}_{m0['mode']}_{m0['polarization']}_" f"{m0['obs_mode']}_{min_st}_{max_et}_{m0['crid']}_{m0['accuracy']}" f"{ebd}"
                             mosaic_path = f"{out_dir}/{mosaic_name}"
                             write_vrt(mosaic_path, mosaic_xml)
                             summary[category]["mosaics"].append(mosaic_path)
@@ -812,10 +794,7 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
                                 print(f"      Mosaic: {mosaic_name}")
 
                             ds = min_st[:8]
-                            mi = {"path": mosaic_path, "band_idx": 1,
-                                  "date": f"{ds[:4]}-{ds[4:6]}-{ds[6:]}",
-                                  "transform": union_tf, "w": union_w, "h": union_h,
-                                  "nodata": m0.get("nodata")}
+                            mi = {"path": mosaic_path, "band_idx": 1, "date": f"{ds[:4]}-{ds[4:6]}-{ds[6:]}", "transform": union_tf, "w": union_w, "h": union_h, "nodata": m0.get("nodata")}
                             mosaic_items.append(mi)
                             if category == "backscatter":
                                 date_pol_sources[(track, direction, mi["date"])].append((mosaic_path, pol_str, _ms))
@@ -823,10 +802,7 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
                             # Single frame in this cycle -- use TIF directly
                             m = frame_items[0]
                             ds = m["start_time"][:8]
-                            ti = {"path": m["path"], "band_idx": 1,
-                                  "date": f"{ds[:4]}-{ds[4:6]}-{ds[6:]}",
-                                  "transform": m["transform"], "w": m["w"], "h": m["h"],
-                                  "nodata": m.get("nodata")}
+                            ti = {"path": m["path"], "band_idx": 1, "date": f"{ds[:4]}-{ds[4:6]}-{ds[6:]}", "transform": m["transform"], "w": m["w"], "h": m["h"], "nodata": m.get("nodata")}
                             mosaic_items.append(ti)
                             if category == "backscatter":
                                 date_pol_sources[(track, direction, ti["date"])].append((m["path"], pol_str, _ms))
@@ -840,10 +816,7 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
                     ts_items = []
                     for m in sorted_metas:
                         ds = m["start_time"][:8]
-                        ti = {"path": m["path"], "band_idx": 1,
-                              "date": f"{ds[:4]}-{ds[4:6]}-{ds[6:]}",
-                              "transform": m["transform"], "w": m["w"], "h": m["h"],
-                              "nodata": m.get("nodata")}
+                        ti = {"path": m["path"], "band_idx": 1, "date": f"{ds[:4]}-{ds[4:6]}-{ds[6:]}", "transform": m["transform"], "w": m["w"], "h": m["h"], "nodata": m.get("nodata")}
                         ts_items.append(ti)
                         # Track TIF for potential multi-pol VRT (backscatter)
                         if category == "backscatter":
@@ -908,8 +881,7 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
                 # Only build multi-pol VRT when >1 polarization
                 if len(unique) > 1:
                     # Band order: likepol (hh/vv), crosspol (hv/vh), ratio last
-                    _pol_order = {"hh": 0, "vv": 0, "hv": 1, "vh": 1,
-                                  "hhhvra": 2, "vvvhra": 2}
+                    _pol_order = {"rh": 0, "rv": 1, "rhrv": 2, "rhrvratio": 3}
                     unique.sort(key=lambda x: (_pol_order.get(x[1], 1), x[1]))
                     band_files = [p for p, _, _ in unique]
                     band_names = [ps for _, ps, _ in unique]
@@ -928,19 +900,12 @@ def build_track_vrts(output_path, frequency, mode_str, verbose=False, output_aut
                         else:
                             vrt_name = src_base.replace(".tif", "") + ebd
                         vrt_path = f"{out_dir}/{vrt_name}"
-                        vrt_xml = nisar_tools.generate_vrt_xml_single_step(
-                            w, h, tf, crs_w, band_files, band_names, date, dtype=dt, nodata=nd, metadata=_vrt_meta)
+                        vrt_xml = nisar_tools.generate_vrt_xml_single_step(w, h, tf, crs_w, band_files, band_names, date, dtype=dt, nodata=nd, metadata=_vrt_meta)
                         write_vrt(vrt_path, vrt_xml)
                         # Replace individual pol TIFs/VRTs with the multi-pol VRT
                         covered = set(band_files)
-                        summary["backscatter"]["single_dates"] = [
-                            p for p in summary["backscatter"]["single_dates"]
-                            if p not in covered
-                        ]
-                        summary["backscatter"]["mosaics"] = [
-                            p for p in summary["backscatter"]["mosaics"]
-                            if p not in covered
-                        ]
+                        summary["backscatter"]["single_dates"] = [p for p in summary["backscatter"]["single_dates"] if p not in covered]
+                        summary["backscatter"]["mosaics"] = [p for p in summary["backscatter"]["mosaics"] if p not in covered]
                         summary["backscatter"]["single_dates"].append(vrt_path)
 
     _sync_vrts_to_s3()

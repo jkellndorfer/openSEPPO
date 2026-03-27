@@ -35,7 +35,7 @@ With --group results are organised by (track, direction, frame) and ordered
 by start_time:
   stdout     section headers + URLs for each group
   --output   a directory; one file per group named:
-            MISSION_TRK_DIR_FRM_firstDate_lastDate_{suffix}.{ext}
+            MISSION_PRODUCT_TRK_DIR_FRM_firstDate_lastDate_{suffix}.{ext}
 
 Output formats: url (default), csv, json, geojson, kml
 
@@ -469,7 +469,7 @@ def _build_cmr_spatial(args):
     if args.point:
         lon, lat = args.point
         if args.buffer:
-            # buffer in degrees; 1 deg ≈ 111 320 m
+            # buffer in degrees; 1 deg ~ 111 320 m
             return {"circle": (lon, lat, args.buffer * 111320)}
         return {"point": (lon, lat)}
     if args.bbox:
@@ -850,8 +850,17 @@ def _mission_str(grp):
     return "NISAR"
 
 
-def _group_file_base(mission, track, direction, frame, first, last, fmt):
-    base = f"{mission}_{track:03d}_{direction or 'X'}_{frame:03d}_{first}_{last}"
+def _product_str(grp):
+    for r in grp:
+        p = r.get("product")
+        if p:
+            return str(p).upper()
+    return ""
+
+
+def _group_file_base(mission, product, track, direction, frame, first, last, fmt):
+    prod = f"_{product}" if product else ""
+    base = f"{mission}{prod}_{track:03d}_{direction or 'X'}_{frame:03d}_{first}_{last}"
     return f"{base}_s3urls.txt" if fmt == "url" else f"{base}.{fmt}"
 
 
@@ -864,7 +873,8 @@ def output_grouped(records, args):
             grp = groups[(track, direction, frame)]
             first, last = _date_range(grp)
             mission = _mission_str(grp)
-            fname = _group_file_base(mission, track, direction, frame, first, last, args.format)
+            product = _product_str(grp)
+            fname = _group_file_base(mission, product, track, direction, frame, first, last, args.format)
             fpath = os.path.join(args.output, fname)
             lines = format_output(grp, args.format, args.columns, https=args.https)
             content = "\n".join(lines) + ("\n" if lines else "")
@@ -877,11 +887,13 @@ def output_grouped(records, args):
             first_group = True
             for track, direction, frame in order:
                 grp = groups[(track, direction, frame)]
+                product = _product_str(grp)
                 urls = format_output(grp, "url", https=args.https)
                 if not first_group:
                     sys.stdout.write("\n")
                 first_group = False
-                print(f"=== Track: {track:03d} | Direction: {direction or '?'} | Frame: {frame:03d} ===")
+                prod_str = f" | Product: {product}" if product else ""
+                print(f"=== Track: {track:03d} | Direction: {direction or '?'} | Frame: {frame:03d}{prod_str} ===")
                 sys.stdout.write("\n".join(urls))
                 if urls:
                     sys.stdout.write("\n")
@@ -923,6 +935,9 @@ def processing(args):
     output = "\n".join(lines) + ("\n" if lines else "")
 
     if args.output:
+        out_dir = os.path.dirname(args.output)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
         with open(args.output, "w") as fh:
             fh.write(output)
         if args.verbose:
@@ -1037,7 +1052,7 @@ def myargsparse(a):
     geom_src.add_argument("--bbox", nargs=4, type=float, metavar=("MIN_LON", "MIN_LAT", "MAX_LON", "MAX_LAT"), help="Bounding box in (xmin ymin xmax ymax) order")
     geom_src.add_argument("--point", nargs=2, type=float, metavar=("LON", "LAT"), help="Point in WGS84 lon/lat.  Use --buffer for radius search.")
     geom_src.add_argument("--geojson", metavar="FILE", help="GeoJSON file.  First feature used unless --union_geojson.")
-    sf.add_argument("--buffer", type=float, metavar="DEG", help="Buffer radius in degrees for --point (converted to metres: 1 deg ≈ 111 km)")
+    sf.add_argument("--buffer", type=float, metavar="DEG", help="Buffer radius in degrees for --point (converted to metres: 1 deg ~ 111 km)")
     sf.add_argument("--union_geojson", action="store_true", default=False, help="Union all GeoJSON features into a single geometry")
 
     # -- Output ----------------------------------------------------------------
