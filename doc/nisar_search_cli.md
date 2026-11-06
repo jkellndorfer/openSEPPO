@@ -114,6 +114,8 @@ ISO 8601 format: `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM:SS`. Only for single-acquisit
 | `--https` | Emit https:// URLs instead of s3:// (only for `--format url`). |
 | `-asf`, `--asf_search` | Use the `asf_search` package (ASF SearchAPI) instead of the default direct CMR query. Requires `asf_search` (`mamba install -c conda-forge asf_search` or `pip install asf-search`). |
 | `--limit N` | Maximum number of granules to retrieve. |
+| `--download DIR` | Download the results to `DIR` over https with `earthaccess`, skipping files already there. More than 50 products need an explicit `--limit`. |
+| `--download_threads N` | Parallel downloads for `--download` (default 4). |
 | `-v`, `--verbose` | Print CMR / asf_search kwargs, granule count, etc. to stderr. |
 | `--dryrun` | Print the CMR / asf_search query without logging in or searching, then exit. |
 

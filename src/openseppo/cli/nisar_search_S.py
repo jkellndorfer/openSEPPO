@@ -36,6 +36,9 @@ Output formats: url (default), csv, json, geojson, kml.  The url is the
 Bhoonidhi download endpoint; fetching it requires a Bearer token, and products
 with online = N must first be ordered through Bhoonidhi Browse&Order.
 
+--download DIR fetches the results to DIR, one at a time because the API allows 2
+download requests per minute per IP.  Interrupted downloads resume on the next run.
+
 Dependencies (all conda-forge):
   requests
 """
@@ -49,6 +52,7 @@ import netrc
 import os
 import re
 import shlex
+import shutil
 import sys
 import tempfile
 import time
@@ -101,6 +105,10 @@ TOKEN_MARGIN = 60  # seconds before expiry at which a token is no longer used
 REQUEST_TIMEOUT = 120
 RETRY_STATUS = frozenset({429, 502, 503, 504})
 MAX_RETRIES = 4
+DOWNLOAD_MIN_INTERVAL = 30.0  # API limit: 2 download requests per minute per IP
+DOWNLOAD_GUARD = 50  # more products than this need an explicit --limit
+DOWNLOAD_CHUNK = 1024 * 1024
+HDF5_SIGNATURE = b"\x89HDF\r\n\x1a\n"
 PAGINATION_KEYS = ("token", "page")
 
 # Columns differ from seppo_nisar_search: one download url per product, no bucket,
@@ -208,6 +216,7 @@ class BhoonidhiClient:
         self.verbose = verbose
         self._access_token = None
         self._last_search = 0.0
+        self._last_download = None
 
     def _log(self, msg):
         if self.verbose:
@@ -264,19 +273,20 @@ class BhoonidhiClient:
         self._log("Logging in to Bhoonidhi.")
         return self._token_request({"userId": user, "password": password, "grant_type": "password"}, user)
 
-    def request(self, method, url, **kwargs):
+    def request(self, method, url, ok_status=(200,), **kwargs):
         """Authorized request; refreshes once on 401 and backs off on transient errors."""
         if self._access_token is None:
             self._access_token = self._get_access_token()
+        extra_headers = kwargs.pop("headers", {})
         reauthorized = False
         attempt = 0
         while True:
-            headers = {"Authorization": f"Bearer {self._access_token}"}
+            headers = {**extra_headers, "Authorization": f"Bearer {self._access_token}"}
             status, retry_after = None, None
             try:
                 resp = self.session.request(method, url, headers=headers, timeout=REQUEST_TIMEOUT, **kwargs)
                 status = resp.status_code
-                if status == 200:
+                if status in ok_status:
                     return resp
                 if status == 401 and not reauthorized:
                     self._access_token = self._get_access_token(force_new=True)
@@ -338,6 +348,68 @@ class BhoonidhiClient:
                 break
         return features
 
+    def download(self, granule, url, directory):
+        """Download one product to directory/granule.h5, resuming a partial file; returns its path."""
+        final = os.path.join(directory, os.path.basename(granule) + ".h5")
+        if os.path.exists(final):
+            print(f"  already present: {final}", file=sys.stderr)
+            return final
+        part = final + ".part"
+
+        attempt = 0
+        while True:
+            have = os.path.getsize(part) if os.path.exists(part) else 0
+            wait = (self._last_download or 0) + DOWNLOAD_MIN_INTERVAL - time.monotonic()
+            if self._last_download is not None and wait > 0:
+                time.sleep(wait)
+            self._last_download = time.monotonic()
+            headers = {"Range": f"bytes={have}-"} if have else {}
+            with self.request("GET", url, ok_status=(200, 206, 416), stream=True, headers=headers) as resp:
+                if resp.status_code == 416:  # nothing left beyond what we have
+                    total = have
+                else:
+                    if resp.status_code == 200:  # server ignored the range: start over
+                        have = 0
+                    total = have + int(resp.headers.get("Content-Length") or 0)
+                    if have == 0 and resp.status_code == 200 and total:
+                        _require_free_space(directory, total)
+                    received = self._stream_to(resp, part, have, total)
+                    if received is None:
+                        attempt += 1
+                        if attempt > MAX_RETRIES:
+                            raise BhoonidhiError(f"{granule}: download kept failing; the partial file is kept for resuming: {part}")
+                        time.sleep(5 * 2 ** (attempt - 1))
+                        continue
+                    attempt = 0
+            size = os.path.getsize(part)
+            if total and size != total:
+                continue  # stream ended early without an error: resume
+            with open(part, "rb") as fh:
+                if fh.read(len(HDF5_SIGNATURE)) != HDF5_SIGNATURE:
+                    raise BhoonidhiError(f"{granule}: download is not an HDF5 file; left at {part}")
+            os.replace(part, final)
+            return final
+
+    def _stream_to(self, resp, part, have, total):
+        """Append a response body to part.  Returns bytes written, or None if the stream broke."""
+        started = time.monotonic()
+        written = 0
+        next_report = started + 30
+        try:
+            with open(part, "ab" if have else "wb") as fh:
+                for chunk in resp.iter_content(DOWNLOAD_CHUNK):
+                    fh.write(chunk)
+                    written += len(chunk)
+                    now = time.monotonic()
+                    if now >= next_report:
+                        next_report = now + 30
+                        pct = f"{100 * (have + written) / total:.0f}%, " if total else ""
+                        print(f"  {pct}{written / 1e6 / (now - started):.1f} MB/s", file=sys.stderr)
+        except requests.RequestException as e:
+            print(f"  connection lost after {written / 1e6:.0f} MB ({type(e).__name__}); will resume", file=sys.stderr)
+            return None
+        return written
+
     def list_collections(self):
         return _json(self.request("GET", COLLECTIONS_URL))
 
@@ -356,6 +428,12 @@ class BhoonidhiClient:
             raise BhoonidhiError(f"Bhoonidhi logout failed, {_describe_error(resp)}", resp.status_code)
         os.unlink(TOKEN_CACHE)
         print("Logged out of Bhoonidhi.", file=sys.stderr)
+
+
+def _require_free_space(directory, needed):
+    free = shutil.disk_usage(directory).free
+    if free < needed:
+        raise BhoonidhiError(f"Not enough disk space in {directory}: {needed / 1e9:.1f} GB needed, {free / 1e9:.1f} GB free")
 
 
 def _next_cursor(page):
@@ -477,6 +555,8 @@ def _build_filter(args):
     the granule name.  Results are still post-filtered on the name by _filter_records.
     """
     clauses = []
+    if args.granule:
+        clauses.append(_values_clause("id", [g.removesuffix(".h5") for g in args.granule]))
     for prop, values in (("Track", args.track), ("Frame", args.frame), ("CycleNumber", args.cycle)):
         if values:
             clauses.append(_values_clause(prop, values))
@@ -484,7 +564,7 @@ def _build_filter(args):
         clauses.append(_values_clause("Node", [{"A": "Ascending", "D": "Descending"}[d] for d in args.direction]))
     if args.online_only:
         clauses.append(_values_clause("Online", ["Y"]))
-    if not args.urgent_response:
+    if not args.urgent_response and not args.granule:
         # Excluded here rather than only afterwards: UR products are the newest, so
         # they would otherwise consume --limit and leave nothing after filtering.
         clauses.append({"op": "not", "args": [{"op": "like", "args": [{"property": "id"}, "%_UR_%"]}]})
@@ -581,7 +661,7 @@ def _filter_records(records, args):
     if unparsed:
         print(f"Warning: {unparsed} of {len(records)} product id(s) are not standard NISAR granule names; " "track, frame and cycle are unavailable for them, so they fail any filter on those columns.", file=sys.stderr)
 
-    if not args.urgent_response:
+    if not args.urgent_response and not args.granule:
         records = [r for r in records if r.get("proctype") != "UR"]
     records = _apply_column_filters(records, args)
     if args.online_only:
@@ -592,6 +672,29 @@ def _filter_records(records, args):
         keep = {id(r) for r in parsed}
         records = [r for r in records if r.get("track") is None or id(r) in keep]
     return records
+
+
+def _download_records(client, records, args):
+    """Fetch records to args.download, continuing past failures and reporting them at the end."""
+    if not args.download:
+        return
+    os.makedirs(args.download, exist_ok=True)
+    failed = []
+    for i, rec in enumerate(records, 1):
+        granule = rec["granule"]
+        print(f"[{i}/{len(records)}] {granule}", file=sys.stderr)
+        if rec.get("online") == "N":
+            print("  skipped: offline; order it through Bhoonidhi Browse&Order first", file=sys.stderr)
+            failed.append(granule)
+            continue
+        try:
+            path = client.download(granule, rec["url"], args.download)
+            print(f"  {path} ({os.path.getsize(path) / 1e6:.0f} MB)", file=sys.stderr)
+        except BhoonidhiError as e:
+            print(f"  failed: {e}", file=sys.stderr)
+            failed.append(granule)
+    if failed:
+        raise BhoonidhiError(f"{len(failed)} of {len(records)} download(s) did not complete: {', '.join(failed)}")
 
 
 def processing(args, client=None):
@@ -630,6 +733,9 @@ def processing(args, client=None):
     if offline:
         print(f"Note: {offline} of {len(records)} product(s) are offline: the API cannot download them until they " "are ordered through Bhoonidhi Browse&Order.  --online_only excludes them.", file=sys.stderr)
 
+    if args.download and len(records) > DOWNLOAD_GUARD and not args.limit:
+        raise BhoonidhiError(f"--download would fetch {len(records)} products; narrow the search or pass --limit N to confirm.")
+
     if args.group:
         ungrouped = sum(1 for r in records if r.get("track") is None)
         if ungrouped:
@@ -637,6 +743,7 @@ def processing(args, client=None):
             records = [r for r in records if r.get("track") is not None]
         if records:
             output_grouped(_sort_for_group(records), args)
+        _download_records(client, records, args)
         return
 
     lines = format_output(records, args.format, args.columns)
@@ -652,6 +759,7 @@ def processing(args, client=None):
             print(f"Output written to {args.output}", file=sys.stderr)
     else:
         sys.stdout.write(output)
+    _download_records(client, records, args)
 
 
 # --- Argument parsing ----------------------------------------------------------
@@ -689,6 +797,9 @@ def myargsparse(a):
 \r  Grouped files to directory:
 \r    {thisprog} --product GCOV --bbox 76 10 78 12 --group -o /data/urls/
 
+\r  Download specific granules:
+\r    {thisprog} --granule NISAR_S2_PR_GCOV_031_077_D_084_2500_CRNA_A_20260923T132025_20260923T132056_P00500_M_P_I_001 --download /data/nisar/
+
 \r  Inspect unmodified API records (e.g. to see available properties):
 \r    {thisprog} --product GCOV --limit 2 --raw
 """
@@ -700,6 +811,7 @@ def myargsparse(a):
     # -- Column / metadata filters ---------------------------------------------
     cf = p.add_argument_group("Column / metadata filters (all accept one or more values)")
     cf.add_argument("--collection", nargs="*", metavar="NAME", help=f"Bhoonidhi collection ID(s) to search - overrides {COLLECTION_PREFIX}{{product}} and {BETA_COLLECTION_PREFIX}{{product}} construction from --product.")
+    cf.add_argument("--granule", nargs="+", metavar="NAME", help="Exact granule name(s).  Urgent Response products are included when named here, and the product is taken from the name.")
     cf.add_argument("--mission", nargs="*", metavar="CODE", help="Mission code(s) (e.g. NISAR)")
     cf.add_argument("--inst_level", nargs="*", metavar="CODE", help="Instrument and processing level code(s) from the granule name")
     cf.add_argument("--proctype", nargs="*", metavar="CODE", help="Processing type(s)")
@@ -745,6 +857,7 @@ def myargsparse(a):
     og.add_argument("--format", default="url", choices=["url", "csv", "json", "geojson", "kml"], help="Output format: url (one per line), csv, json, geojson, kml")
     og.add_argument("--columns", nargs="*", metavar="COL", default=S_COLUMNS, help="Columns for csv/json output.")
     og.add_argument("--limit", type=int, metavar="N", help="Maximum number of products to retrieve across all collections, before filters not handled by the API (e.g. --polarization, latest release)")
+    og.add_argument("--download", metavar="DIR", help=f"Download the results to DIR as {{granule}}.h5, skipping files already there and resuming partial ones.  More than {DOWNLOAD_GUARD} products need an explicit --limit.")
     og.add_argument("--raw", action="store_true", default=False, help="Print the unmodified API features as JSON, skipping filters not handled by the API and output formatting")
     og.add_argument("--list_collections", action="store_true", default=False, help="List the collections available from the API and exit")
     og.add_argument("--logout", action="store_true", default=False, help="End the cached API session and remove the token cache, then exit")
@@ -757,6 +870,11 @@ def myargsparse(a):
         p.print_usage()
         sys.exit(0)
 
+    if args.granule:
+        named = [_parse_nisar_granule_name(g.removesuffix(".h5")).get("product") for g in args.granule]
+        if not args.collection and not args.product and all(named):
+            args.product = list(dict.fromkeys(named))
+        args.allcrids = True  # every named granule is wanted, whatever its release
     if not args.collection and not args.product:
         args.product = ["GCOV"]
 

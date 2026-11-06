@@ -106,6 +106,8 @@ _PRODUCT_LEVEL = {
     "SME2": "L3",
 }
 
+DOWNLOAD_GUARD = 50  # more products than this need an explicit --limit
+
 GROUP_REQUIRED = [
     "mission",
     "track",
@@ -1205,6 +1207,22 @@ def output_grouped(records, args):
 # --- Main processing -----------------------------------------------------------
 
 
+def _download_records(records, args):
+    """Fetch records' https URLs to args.download with earthaccess (netrc or prompt login)."""
+    if not args.download:
+        return
+    urls = [r["url_https"] for r in records if r.get("url_https")]
+    if len(urls) != len(records):
+        print(f"Warning: {len(records) - len(urls)} record(s) have no https URL and are not downloaded.", file=sys.stderr)
+    if not HAS_EARTHACCESS:
+        sys.exit("ERROR: --download requires earthaccess. Install with: conda install -c conda-forge earthaccess")
+    earthaccess.login()
+    paths = earthaccess.download(urls, local_path=args.download, threads=args.download_threads)
+    print(f"Downloaded {len(paths)} of {len(urls)} file(s) to {args.download}", file=sys.stderr)
+    if len(paths) != len(urls):
+        sys.exit(1)
+
+
 def processing(args):
     records = search_asf(args) if args.asf_search else search_earthaccess(args)
     if args.dryrun:
@@ -1229,10 +1247,14 @@ def processing(args):
     if not records:
         return
 
+    if args.download and len(records) > DOWNLOAD_GUARD and not args.limit:
+        sys.exit(f"ERROR: --download would fetch {len(records)} products; narrow the search or pass --limit N to confirm.")
+
     if args.group:
         if args.verbose and args.output:
             print(f"Writing grouped files to: {args.output}", file=sys.stderr)
         output_grouped(records, args)
+        _download_records(records, args)
         return
 
     lines = format_output(records, args.format, args.columns, https=args.https)
@@ -1248,6 +1270,7 @@ def processing(args):
             print(f"Output written to {args.output}", file=sys.stderr)
     else:
         sys.stdout.write(output)
+    _download_records(records, args)
 
 
 # --- Argument parsing ----------------------------------------------------------
@@ -1321,6 +1344,9 @@ def myargsparse(a):
 \r  Use asf_search (ASF SearchAPI) instead of direct CMR:
 \r    {thisprog} --product GCOV --track 47 --frame 23 -asf
 
+\r  Download the results:
+\r    {thisprog} --product GCOV --track 64 --frame 23 --limit 2 --download /data/nisar/
+
 \r  Dry-run (show CMR / asf_search kwargs without searching):
 \r    {thisprog} --product GCOV --track 64 --dryrun
 """
@@ -1379,6 +1405,8 @@ def myargsparse(a):
     og.add_argument("--format", default="url", choices=["url", "csv", "json", "geojson", "kml"], help="Output format: url (one per line), csv, json, geojson, kml")
     og.add_argument("--columns", nargs="*", metavar="COL", help="Columns for csv/json output (default: all).  " "Example: --columns product track frame crid url url_https")
     og.add_argument("--limit", type=int, metavar="N", help="Maximum total number of CMR granules to retrieve (across all query patterns)")
+    og.add_argument("--download", metavar="DIR", help=f"Download the results to DIR over https, skipping files already there.  More than {DOWNLOAD_GUARD} products need an explicit --limit.")
+    og.add_argument("--download_threads", type=int, default=4, metavar="N", help="Parallel downloads for --download")
     og.add_argument("-asf", "--asf_search", action="store_true", default=False, help="Use the asf_search package (ASF SearchAPI) instead of the default direct CMR query.")
     og.add_argument("-v", "--verbose", action="store_true", default=False, help="Print CMR / asf_search kwargs, granule count, etc. to stderr")
     og.add_argument("--dryrun", action="store_true", default=False, help="Print the CMR / asf_search kwargs without logging in or searching, then exit")

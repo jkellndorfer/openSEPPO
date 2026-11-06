@@ -45,6 +45,18 @@ session.
 - **Products.** SME2 is not listed among the Bhoonidhi collections.
 - **`--union_geojson`** searches the bounding envelope of all features.
 
+## Downloading
+
+`--download DIR` fetches the search results to `DIR` as `{granule}.h5`. The API
+allows 2 download requests per minute, so products are fetched one at a time, at
+least 30 seconds apart. A file already in `DIR` is skipped, and an interrupted
+download resumes from its `.part` file on the next run. Offline products are
+skipped and reported, and the exit status is non-zero if any download did not
+complete. More than 50 products need an explicit `--limit`.
+
+`--granule NAME [NAME ...]` selects exact granules. The product is taken from the
+name, and Urgent Response products and every named release are kept.
+
 ## Examples
 
 ```bash
@@ -62,6 +74,11 @@ seppo_nisar_search_S --product GSLC --track 64 --direction D --format csv -o res
 
 # One URL file per (track, direction, frame)
 seppo_nisar_search_S --bbox 76 10 78 12 --group -o urls/
+
+# Download two specific granules
+seppo_nisar_search_S --download /data/nisar/ --granule \
+    NISAR_S2_PR_GCOV_031_077_D_084_2500_CRNA_A_20260923T132025_20260923T132056_P00500_M_P_I_001 \
+    NISAR_S2_PR_GCOV_031_012_A_006_3700_DHNA_A_20260919T002342_20260919T002415_P00500_M_P_I_001
 
 # Unmodified API records
 seppo_nisar_search_S --limit 2 --raw

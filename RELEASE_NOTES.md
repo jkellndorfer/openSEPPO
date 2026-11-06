@@ -3,6 +3,18 @@
 **New tool: `seppo_nisar_search_S` — NISAR S-band search via the ISRO Bhoonidhi API**
 - Searches the `NISAR_SSAR_*` and `NISAR_SSAR-Beta_*` collections with the column, time, spatial, grouping and output options of `seppo_nisar_search`, and reuses its granule-name parsing, filtering and formatting. Credentials come from a `bhoonidhi-api.nrsc.gov.in` entry in `~/.netrc`, and tokens are cached in `~/.cache/openseppo/bhoonidhi_token.json` to respect the API's auth rate limit. See the [CLI Reference](nisar_search_S_cli.md).
 
+**`--download` for `seppo_nisar_search` and `seppo_nisar_search_S`**
+- `--download DIR` fetches the search results and skips files already there. More than 50 products need an explicit `--limit`. `seppo_nisar_search` downloads over https with `earthaccess`. `seppo_nisar_search_S` respects the Bhoonidhi limit of 2 download requests per minute, resumes interrupted downloads, and checks size and HDF5 signature before keeping a file.
+- `seppo_nisar_search_S --granule NAME ...` selects exact granules, including Urgent Response products.
+
+**`seppo_nisar_gcov_convert_S`: all S-band dual-pol modes and a correct `-dpratio`**
+- Works with DH and DV granules as well as CR. Without `-vars`, each file uses the power terms of its own polarization mode, so one batch can mix modes; a mixed batch gets one time-series stack per CRS and set of terms. Cross terms such as `HHHV` get their own output file.
+- `-dpratio` now covers DH (`HHHH/HVHV`, token `hhhvra`) and DV (`VVVV/VHVH`, token `vvvhra`) as well as CR (`RHRH/RVRV`, token `rhrvra`), and adds a term missing from `-vars`. The CR token was `rhrvratio`; it now follows the `seppo_nisar_gcov_convert` naming, so CR ratio files get new names.
+- **Fix: `-dpratio` was wrong where a band saturates.** In dB, AMP and DN modes the ratio was computed from output bands that clip (13.3 dB for dB and AMP, 7.1 dB for DN). It now comes from linear power. In the CRNA test frame, 6,368 RHRH and 6,885 RVRV pixels exceed 13.3 dB; one such pixel in a test window read -0.32 dB and should be -6.68 dB. In AMP mode the ratio remains an amplitude ratio times 1000. In DN mode it is the dB ratio at the DN scale, centred on 127.
+- **Fix: the v0.8.1 reprojection fix had not reached this tool.** Reprojected power was still capped near 21.5 linear (13.3 dB). It now clamps to the source band's own range, as `seppo_nisar_gcov_convert` does.
+- **Fix: cross terms could lose their imaginary part** on the datatree read path, which kept the real part instead of the magnitude.
+- `inputDataExceptionMask` (`-vars`) is now handled as a flag grid: uint8, fill 255, block OR when downscaling and nearest resampling. Before, it was processed as backscatter.
+
 **GCOV: per-polarization validity masking from CRID 5032 (`seppo_nisar_gcov_convert`)**
 - From CRID 5032 on, `inputDataExceptionMask` is uint16 with fill 65535. Besides the exception codes in the low byte, it carries one validity bit per polarization, set for fully focused data and cleared for partially focused or missing data. Earlier CRIDs store only the exception codes, as uint8 without fill.
 - For COG/GTiff output of these granules, a backscatter pixel is now also set to nodata where the validity bit of any of its polarizations is off or the grid holds fill, because the subswath `mask` grid does not flag per-polarization gaps. A covariance term such as `HHHV` needs the bits of both `HH` and `HV`. `-nomask` disables this along with the subswath masking. The CRID is read from the granule name, since the GCOV identification group does not carry it.

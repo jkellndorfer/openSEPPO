@@ -17,14 +17,27 @@ SECRET = "s3cret-pw"
 
 
 class Resp:
-    def __init__(self, status=200, body=None, headers=None):
+    def __init__(self, status=200, body=None, headers=None, content=None, break_after=False):
         self.status_code = status
+        self.content = content
+        self.break_after = break_after
         self._body = body if body is not None else {}
         self.headers = headers or {}
         self.url = "https://example.invalid"
 
     def json(self):
         return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def iter_content(self, size):
+        yield self.content
+        if self.break_after:
+            raise ns.requests.ConnectionError("dropped")
 
 
 def NO_RESULTS():
@@ -44,7 +57,7 @@ class Session:
         self.post_calls.append({"url": url, "json": json, "headers": headers})
         return self.token_responses.pop(0)
 
-    def request(self, method, url, headers=None, timeout=None, json=None):
+    def request(self, method, url, headers=None, timeout=None, json=None, stream=False):
         self.api_calls.append({"method": method, "url": url, "headers": headers, "json": dict(json) if json else None})
         return self.api_responses.pop(0) if self.api_responses else NO_RESULTS()
 
@@ -498,3 +511,115 @@ def test_no_arguments_print_usage_only(capsys):
 def test_invalid_direction_rejected():
     with pytest.raises(SystemExit):
         args_for("--direction", "X")
+
+
+# --- Granule selection and download --------------------------------------------
+
+H5 = ns.HDF5_SIGNATURE + b"payload"
+TOKEN_CACHE_OK = {"userId": "me", "access_token": "t", "expires_at": time.time() + 9999}
+
+
+def body_resp(content, status=200, total=None):
+    return Resp(status, headers={"Content-Length": str(total if total is not None else len(content))}, content=content)
+
+
+def download_client(*responses):
+    ns._save_token_cache(TOKEN_CACHE_OK)
+    session = Session(api_responses=list(responses))
+    return ns.BhoonidhiClient(session=session), session
+
+
+def test_granule_selects_by_id_and_keeps_ur_and_product_from_name():
+    ur = GRANULE.replace("_PR_", "_UR_")
+    args = args_for("--granule", ur + ".h5", PAIR)
+    bodies = ns._build_requests(args)
+    assert [b["collections"][0] for b in bodies] == ["NISAR_SSAR_GCOV", "NISAR_SSAR_GUNW", "NISAR_SSAR-Beta_GCOV"]
+    assert bodies[0]["filter"] == {"op": "in", "args": [{"property": "id"}, [ur, PAIR]]}
+
+
+def test_granule_ur_survives_record_filter():
+    ur = GRANULE.replace("_PR_", "_UR_")
+    assert ns._filter_records(records(feature(ur)), args_for("--granule", ur))
+
+
+def test_granule_keeps_each_named_release_and_product():
+    newer = GRANULE.replace("P05006", "P05007")
+    assert len(ns._filter_records(records(feature(GRANULE), feature(newer)), args_for("--granule", GRANULE, newer))) == 2
+    assert ns._filter_records(records(feature(PAIR, "NISAR_SSAR_GUNW")), args_for("--granule", PAIR))
+
+
+def test_download_writes_h5_and_skips_existing(tmp_path):
+    client, session = download_client(body_resp(H5))
+    path = client.download("G", "https://u", str(tmp_path))
+    assert path == str(tmp_path / "G.h5")
+    assert (tmp_path / "G.h5").read_bytes() == H5 and not (tmp_path / "G.h5.part").exists()
+    assert client.download("G", "https://u", str(tmp_path)) == path
+    assert len(session.api_calls) == 1
+
+
+def test_download_resumes_partial_with_range(tmp_path):
+    (tmp_path / "G.h5.part").write_bytes(H5[:4])
+    client, session = download_client(body_resp(H5[4:], 206))
+    client.download("G", "https://u", str(tmp_path))
+    assert session.api_calls[0]["headers"]["Range"] == "bytes=4-"
+    assert (tmp_path / "G.h5").read_bytes() == H5
+
+
+def test_download_restarts_when_server_ignores_range(tmp_path):
+    (tmp_path / "G.h5.part").write_bytes(b"stale")
+    client, _ = download_client(body_resp(H5))
+    client.download("G", "https://u", str(tmp_path))
+    assert (tmp_path / "G.h5").read_bytes() == H5
+
+
+def test_download_recovers_from_dropped_connection(tmp_path):
+    dropped = Resp(200, headers={"Content-Length": str(len(H5))}, content=H5[:5], break_after=True)
+    client, session = download_client(dropped, body_resp(H5[5:], 206))
+    client.download("G", "https://u", str(tmp_path))
+    assert session.api_calls[1]["headers"]["Range"] == "bytes=5-"
+    assert (tmp_path / "G.h5").read_bytes() == H5
+
+
+def test_download_resumes_after_short_stream(tmp_path):
+    client, session = download_client(body_resp(H5[:5], total=len(H5)), body_resp(H5[5:], 206))
+    client.download("G", "https://u", str(tmp_path))
+    assert (tmp_path / "G.h5").read_bytes() == H5 and len(session.api_calls) == 2
+
+
+def test_download_rejects_non_hdf5_and_keeps_no_final_file(tmp_path):
+    client, _ = download_client(body_resp(b"<html>error</html>"))
+    with pytest.raises(ns.BhoonidhiError, match="not an HDF5"):
+        client.download("G", "https://u", str(tmp_path))
+    assert not (tmp_path / "G.h5").exists()
+
+
+def test_download_paces_requests(tmp_path, monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(ns.time, "sleep", sleeps.append)
+    client, _ = download_client(body_resp(H5), body_resp(H5))
+    client.download("A", "https://u", str(tmp_path))
+    client.download("B", "https://u", str(tmp_path))
+    assert len(sleeps) == 1 and 0 < sleeps[0] <= ns.DOWNLOAD_MIN_INTERVAL
+
+
+def test_download_checks_free_space(tmp_path, monkeypatch):
+    monkeypatch.setattr(ns.shutil, "disk_usage", lambda d: type("U", (), {"free": 1})())
+    client, _ = download_client(body_resp(H5))
+    with pytest.raises(ns.BhoonidhiError, match="disk space"):
+        client.download("G", "https://u", str(tmp_path))
+
+
+def test_download_records_skips_offline_and_reports_failure(tmp_path, capsys):
+    client, session = download_client(page([feature(Online="N")]))
+    with pytest.raises(ns.BhoonidhiError, match="1 of 1"):
+        ns.processing(args_for("--download", str(tmp_path / "d")), client)
+    assert "offline" in capsys.readouterr().err
+    assert all("download" not in c["url"] for c in session.api_calls)
+
+
+def test_download_guard_requires_limit(tmp_path):
+    feats = [feature(GRANULE.replace("_172_", f"_{i:03d}_")) for i in range(ns.DOWNLOAD_GUARD + 1)]
+    client, session = download_client(page(feats))
+    with pytest.raises(ns.BhoonidhiError, match="pass --limit"):
+        ns.processing(args_for("--download", str(tmp_path / "d")), client)
+    assert all("download" not in c["url"] for c in session.api_calls)
