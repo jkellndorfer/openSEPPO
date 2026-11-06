@@ -1064,7 +1064,8 @@ def _to_kml_str(records):
     ]
     for rec in records:
         url = rec.get("url") or rec.get("url_https", "")
-        gname = os.path.splitext(os.path.basename(url))[0] if url else "unknown"
+        # rec["granule"]: seppo_nisar_search_S urls are query strings with no file basename.
+        gname = rec.get("granule") or (os.path.splitext(os.path.basename(url))[0] if url else "unknown")
         props = _rec_props(rec)
         desc = "\n".join(f"{k}: {v}" for k, v in props.items() if v is not None)
         poly = _geom_to_kml_polygon(rec.get("_geom"))
@@ -1154,10 +1155,10 @@ def _product_str(grp):
     return ""
 
 
-def _group_file_base(mission, product, track, direction, frame, first, last, fmt):
+def _group_file_base(mission, product, track, direction, frame, first, last, fmt, url_suffix="s3urls"):
     prod = f"_{product}" if product else ""
     base = f"{mission}{prod}_{track:03d}_{direction or 'X'}_{frame:03d}_{first}_{last}"
-    return f"{base}_s3urls.txt" if fmt == "url" else f"{base}.{fmt}"
+    return f"{base}_{url_suffix}.txt" if fmt == "url" else f"{base}.{fmt}"
 
 
 def output_grouped(records, args):
@@ -1170,7 +1171,7 @@ def output_grouped(records, args):
             first, last = _date_range(grp)
             mission = _mission_str(grp)
             product = _product_str(grp)
-            fname = _group_file_base(mission, product, track, direction, frame, first, last, args.format)
+            fname = _group_file_base(mission, product, track, direction, frame, first, last, args.format, getattr(args, "url_file_suffix", "s3urls"))
             fpath = os.path.join(args.output, fname)
             lines = format_output(grp, args.format, args.columns, https=args.https)
             content = "\n".join(lines) + ("\n" if lines else "")
@@ -1385,7 +1386,7 @@ def myargsparse(a):
     args = p.parse_args(a[1:])
 
     if len(a) == 1:
-        p.print_help()
+        p.print_usage()
         sys.exit(0)
 
     # Normalise direction

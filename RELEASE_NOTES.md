@@ -1,3 +1,13 @@
+# v0.10.0
+
+**New tool: `seppo_nisar_search_S` — NISAR S-band search via the ISRO Bhoonidhi API**
+- Searches the `NISAR_SSAR_*` and `NISAR_SSAR-Beta_*` collections with the column, time, spatial, grouping and output options of `seppo_nisar_search`, and reuses its granule-name parsing, filtering and formatting. Credentials come from a `bhoonidhi-api.nrsc.gov.in` entry in `~/.netrc`, and tokens are cached in `~/.cache/openseppo/bhoonidhi_token.json` to respect the API's auth rate limit. See the [CLI Reference](nisar_search_S_cli.md).
+
+**GCOV: per-polarization validity masking from CRID 5032 (`seppo_nisar_gcov_convert`)**
+- From CRID 5032 on, `inputDataExceptionMask` is uint16 with fill 65535. Besides the exception codes in the low byte, it carries one validity bit per polarization, set for fully focused data and cleared for partially focused or missing data. Earlier CRIDs store only the exception codes, as uint8 without fill.
+- For COG/GTiff output of these granules, a backscatter pixel is now also set to nodata where the validity bit of any of its polarizations is off or the grid holds fill, because the subswath `mask` grid does not flag per-polarization gaps. A covariance term such as `HHHV` needs the bits of both `HH` and `HV`. `-nomask` disables this along with the subswath masking. The CRID is read from the granule name, since the GCOV identification group does not carry it.
+- `inputDataExceptionMask` keeps its uint16 type and fill value through output and downscaling, and its COG overviews use nearest resampling so flag values are never averaged.
+
 # v0.9.0
 
 **GCOV: equal-area authalic Wagner VII output (`-t_srs wagner7`)**
